@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) Yuki Ono.
+ * Licensed under the MIT License.
+ */
+
 #[macro_use]
 extern crate lazy_static;
 
@@ -392,7 +397,6 @@ Content-Transfer-Encoding: 7bit
 Content-Language: en-US
 
 test"#;
-
         mail.to_string()
     }
 
