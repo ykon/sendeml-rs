@@ -21,7 +21,6 @@ use chrono::prelude::*;
 use rand::{thread_rng, Rng};
 use rand::distributions::Alphanumeric;
 use rayon::prelude::*;
-use regex::bytes::Regex;
 use serde::Deserialize;
 
 const CRLF: &str = "\r\n";
@@ -41,12 +40,12 @@ fn make_random_message_id_line() -> String {
 }
 
 fn replace_message_id_line(file_buf: &Vec<u8>) -> Vec<u8> {
-    let re = Regex::new(r"Message-ID: \S+\r\n").unwrap();
+    let re = regex::bytes::Regex::new(r"Message-ID: \S+\r\n").unwrap();
     re.replace(file_buf, make_random_message_id_line().as_bytes()).to_vec()
 }
 
 fn replace_date_line(file_buf: &Vec<u8>) -> Vec<u8> {
-    let re = Regex::new(r"Date: [\S ]+\r\n").unwrap();
+    let re = regex::bytes::Regex::new(r"Date: [\S ]+\r\n").unwrap();
     re.replace(&file_buf, make_now_date_line().as_bytes()).to_vec()
 }
 
@@ -365,8 +364,6 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use regex::Regex;
-
     #[test]
     fn make_now_date_line_test() {
         let line = super::make_now_date_line();
@@ -401,7 +398,7 @@ test"#;
     }
 
     fn get_message_id_line(mail: &String) -> Option<String> {
-        let re = Regex::new(r"Message-ID: \S+\r\n").unwrap();
+        let re = regex::Regex::new(r"Message-ID: \S+\r\n").unwrap();
         re.find(&mail).map(|m| m.as_str().to_string())
     }
 
@@ -416,7 +413,7 @@ test"#;
     }
 
     fn get_date_line(mail: &String) -> Option<String> {
-        let re = Regex::new(r"Date: [\S ]+\r\n").unwrap();
+        let re = regex::Regex::new(r"Date: [\S ]+\r\n").unwrap();
         re.find(&mail).map(|m| m.as_str().to_string())
     }
 
@@ -530,7 +527,7 @@ test"#;
     fn check_settings_test() {
         fn check_no_key(key: &str) -> super::SendEmlResult<super::Settings> {
             let json = super::make_json_sample();
-            let re = Regex::new(key).unwrap();
+            let re = regex::Regex::new(key).unwrap();
             let no_key = re.replace(&json, format!("X-{}", key).as_str());
             super::check_settings(super::get_settings_from_text(&no_key.to_string()).unwrap())
         }
