@@ -37,7 +37,6 @@ fn make_random_message_id_line() -> String {
         .sample_iter(&Alphanumeric)
         .take(length)
         .collect();
-
     format!("Message-ID: <{}>{}", rand_str, CRLF)
 }
 
@@ -162,25 +161,26 @@ fn get_settings(json_file: &String) -> SendEmlResult<Settings> {
     get_settings_from_text(&fs::read_to_string(json_file)?)
 }
 
-fn check_settings(s: Settings) -> SendEmlResult<Settings> {
-    let key = if s.smtp_host.is_none() {
-        "smtpHost"
-    } else if s.smtp_port.is_none() {
-        "smtpPort"
-    } else if s.from_address.is_none() {
-        "fromAddress"
-    } else if s.to_address.is_none() {
-        "toAddress"
-    } else if s.eml_file.is_none() {
-        "emlFile"
-    } else {
-        ""
-    };
+fn check_settings(settings: Settings) -> SendEmlResult<Settings> {
+    fn get_null_key(s: &Settings) -> &str {
+        return if s.smtp_host.is_none() {
+            "smtpHost"
+        } else if s.smtp_port.is_none() {
+            "smtpPort"
+        } else if s.from_address.is_none() {
+            "fromAddress"
+        } else if s.to_address.is_none() {
+            "toAddress"
+        } else if s.eml_file.is_none() {
+            "emlFile"
+        } else {
+            ""
+        }
+    }
 
-    if key != "" {
-        Err(new_error(&format!("{} key does not exist", key)))
-    } else {
-        Ok(s)
+    match get_null_key(&settings) {
+        "" => Ok(settings),
+        null_key => Err(new_error(&format!("{} key does not exist", null_key)))
     }
 }
 
