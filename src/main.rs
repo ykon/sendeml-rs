@@ -448,10 +448,30 @@ test"#;
         make_invalid_mail().as_bytes().to_vec()
     }
 
-    fn get_message_id_line(mail: &Vec<u8>) -> Option<String> {
-        let mail_str = String::from_utf8(mail.to_owned()).unwrap();
+    fn get_message_id_line(header: &Vec<u8>) -> Option<String> {
+        let header_str = String::from_utf8(header.to_owned()).unwrap();
         let re = regex::Regex::new(r"Message-ID: \S+\r\n").unwrap();
-        re.find(&mail_str).map(|m| m.as_str().to_string())
+        re.find(&header_str).map(|m| m.as_str().to_string())
+    }
+
+    fn get_date_line(header: &Vec<u8>) -> Option<String> {
+        let header_str = String::from_utf8(header.to_owned()).unwrap();
+        let re = regex::Regex::new(r"Date: [\S ]+\r\n").unwrap();
+        re.find(&header_str).map(|m| m.as_str().to_string())
+    }
+
+    #[test]
+    fn get_message_id_line_test() {
+        let mail = make_simple_mail_bytes();
+        let (header, _) = super::split_mail(&mail).unwrap();
+        assert_eq!("Message-ID: <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_message_id_line(&header).unwrap());
+    }
+
+    #[test]
+    fn get_date_line_test() {
+        let mail = make_simple_mail_bytes();
+        let (header, _) = super::split_mail(&mail).unwrap();
+        assert_eq!("Date: Sun, 26 Jul 2020 22:01:37 +0900\r\n", get_date_line(&header).unwrap())
     }
 
     #[test]
@@ -462,12 +482,6 @@ test"#;
         let orig_line = get_message_id_line(&mail).unwrap();
         let repl_line = get_message_id_line(&repl_mail).unwrap();
         assert_ne!(orig_line, repl_line);
-    }
-
-    fn get_date_line(mail: &Vec<u8>) -> Option<String> {
-        let mail_str = String::from_utf8(mail.to_owned()).unwrap();
-        let re = regex::Regex::new(r"Date: [\S ]+\r\n").unwrap();
-        re.find(&mail_str).map(|m| m.as_str().to_string())
     }
 
     #[test]
@@ -521,31 +535,30 @@ test"#;
 
     #[test]
     fn replace_header_test() {
-        let mail = make_simple_mail_bytes();
-        let (header, _) = super::split_mail(&mail).unwrap();
-        let date_line = get_date_line(&mail).unwrap_or_default();
-        let mid_line = get_message_id_line(&mail).unwrap_or_default();
+        let (header, _) = super::split_mail(&make_simple_mail_bytes()).unwrap();
+        let date_line = get_date_line(&header).unwrap();
+        let mid_line = get_message_id_line(&header).unwrap();
 
         let repl_header = super::replace_header(&header, false, false);
         assert_eq!(header, repl_header);
 
-        fn replace(header: &Vec<u8>, update_date: bool, update_message_id: bool) -> (String, String) {
-            let repl_header = super::replace_header(header, update_date, update_message_id);
-            assert_ne!(*header, repl_header);
-            (get_date_line(&repl_header).unwrap(), get_message_id_line(&repl_header).unwrap())
-        }
+        let replace = |update_date: bool, update_message_id: bool| -> (String, String) {
+            let r_header = super::replace_header(&header, update_date, update_message_id);
+            assert_ne!(header, r_header);
+            (get_date_line(&r_header).unwrap(), get_message_id_line(&r_header).unwrap())
+        };
 
-        let (repl_date_line, repl_mid_line) = replace(&header, true, true);
-        assert_ne!(date_line, repl_date_line);
-        assert_ne!(mid_line, repl_mid_line);
+        let (r_date_line, r_mid_line) = replace(true, true);
+        assert_ne!(date_line, r_date_line);
+        assert_ne!(mid_line, r_mid_line);
 
-        let (repl_date_line, repl_mid_line) = replace(&header, true, false);
-        assert_ne!(date_line, repl_date_line);
-        assert_eq!(mid_line, repl_mid_line);
+        let (r_date_line, r_mid_line) = replace(true, false);
+        assert_ne!(date_line, r_date_line);
+        assert_eq!(mid_line, r_mid_line);
 
-        let (repl_date_line, repl_mid_line) = replace(&header, false, true);
-        assert_eq!(date_line, repl_date_line);
-        assert_ne!(mid_line, repl_mid_line);
+        let (r_date_line, r_mid_line) = replace(false, true);
+        assert_eq!(date_line, r_date_line);
+        assert_ne!(mid_line, r_mid_line);
     }
 
     #[test]
