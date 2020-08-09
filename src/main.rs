@@ -520,7 +520,7 @@ test"#;
     }
 
     #[test]
-    fn replace_header() {
+    fn replace_header_test() {
         let mail = make_simple_mail_bytes();
         let (header, _) = super::split_mail(&mail).unwrap();
         let date_line = get_date_line(&mail).unwrap_or_default();
