@@ -41,32 +41,32 @@ fn make_random_message_id_line() -> String {
     format!("Message-ID: <{}>{}", rand_str, CRLF)
 }
 
-fn replace_message_id_line(file_buf: &Vec<u8>) -> Vec<u8> {
+fn replace_message_id_line(file_buf: &[u8]) -> std::borrow::Cow<[u8]> {
     let re = regex::bytes::Regex::new(r"Message-ID: \S+\r\n").unwrap();
-    re.replace(file_buf, make_random_message_id_line().as_bytes()).to_vec()
+    re.replace(file_buf, make_random_message_id_line().as_bytes())
 }
 
-fn replace_date_line(file_buf: &Vec<u8>) -> Vec<u8> {
+fn replace_date_line(file_buf: &[u8]) -> std::borrow::Cow<[u8]> {
     let re = regex::bytes::Regex::new(r"Date: [\S ]+\r\n").unwrap();
-    re.replace(&file_buf, make_now_date_line().as_bytes()).to_vec()
+    re.replace(&file_buf, make_now_date_line().as_bytes())
 }
 
 fn is_not_update(update_date: bool, update_message_id: bool) -> bool {
     !update_date && !update_message_id
 }
 
-fn find_empty_line(file_buf: &Vec<u8>) -> Option<usize> {
+fn find_empty_line(file_buf: &[u8]) -> Option<usize> {
     let re = regex::bytes::Regex::new(r"\r\n\r\n").unwrap();
     re.find(&file_buf).map(|m| m.start())
 }
 
 const EMPTY_LINE: [u8; 4] = [CR, LF, CR, LF];
 
-fn combine_mail(header: &Vec<u8>, body: &Vec<u8>) -> Vec<u8> {
-    [header.to_owned(), EMPTY_LINE.to_vec(), body.to_owned()].concat()
+fn combine_mail(header: &[u8], body: &[u8]) -> Vec<u8> {
+    [header, &EMPTY_LINE, body].concat()
 }
 
-fn split_mail(file_buf: &Vec<u8>) -> Option<(Vec<u8>, Vec<u8>)> {
+fn split_mail(file_buf: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     find_empty_line(file_buf).map(|idx| {
         let header = file_buf[0..idx].to_vec();
         let body = file_buf[(idx + EMPTY_LINE.len())..file_buf.len()].to_vec();
@@ -74,16 +74,16 @@ fn split_mail(file_buf: &Vec<u8>) -> Option<(Vec<u8>, Vec<u8>)> {
     })
 }
 
-fn replace_header(header: &Vec<u8>, update_date: bool, update_message_id: bool) -> Vec<u8> {
+fn replace_header(header: &[u8], update_date: bool, update_message_id: bool) -> Vec<u8> {
     match (update_date, update_message_id) {
-        (true, true) => replace_message_id_line(&replace_date_line(&header)),
-        (true, false) => replace_date_line(&header),
-        (false, true) => replace_message_id_line(&header),
+        (true, true) => replace_message_id_line(&replace_date_line(&header)).into_owned(),
+        (true, false) => replace_date_line(header).into_owned(),
+        (false, true) => replace_message_id_line(&header).into_owned(),
         (false, false) => header.to_owned()
     }
 }
 
-fn replace_raw_bytes(file_buf: &Vec<u8>, update_date: bool, update_message_id: bool) -> SendEmlResult<Vec<u8>> {
+fn replace_raw_bytes(file_buf: &[u8], update_date: bool, update_message_id: bool) -> SendEmlResult<Vec<u8>> {
     if is_not_update(update_date, update_message_id) {
         return Ok(file_buf.to_owned())
     }
@@ -191,11 +191,11 @@ fn new_error(msg: &str) -> SendEmlError {
     SendEmlError::StrError(msg.to_string())
 }
 
-fn get_settings_from_text(text: &String) -> SendEmlResult<Settings> {
-    serde_json::from_str(&text).map_err(|e| SendEmlError::JsonError(e))
+fn get_settings_from_text(text: &str) -> SendEmlResult<Settings> {
+    serde_json::from_str(text).map_err(|e| SendEmlError::JsonError(e))
 }
 
-fn get_settings(json_file: &String) -> SendEmlResult<Settings> {
+fn get_settings(json_file: &str) -> SendEmlResult<Settings> {
     get_settings_from_text(&fs::read_to_string(json_file)?)
 }
 
@@ -218,7 +218,7 @@ fn check_settings(settings: Settings) -> SendEmlResult<Settings> {
 
     match get_null_key(&settings) {
         "" => Ok(settings),
-        null_key => Err(new_error(&format!("{} key does not exist", null_key)))
+        key => Err(new_error(&format!("{} key does not exist", key)))
     }
 }
 
@@ -235,12 +235,12 @@ fn send_line(stream: &mut TcpStream, cmd: &str) -> SendEmlResult<()> {
     Ok(())
 }
 
-fn is_last_reply(line: &String) -> bool {
+fn is_last_reply(line: &str) -> bool {
     let re = regex::Regex::new(r"^\d{3} .+").unwrap();
-    re.is_match(&line)
+    re.is_match(line)
 }
 
-fn is_positive_reply(line: &String) -> bool {
+fn is_positive_reply(line: &str) -> bool {
     match line.chars().next().unwrap_or_default() {
         '2' | '3' => true,
         _ => false
@@ -272,12 +272,7 @@ fn recv_line(reader: &mut TcpReader) -> CmdResult {
     }
 }
 
-fn send_cmd(reader: &mut TcpReader, cmd: &str) -> CmdResult {
-    send_line(reader.get_mut(), cmd)?;
-    recv_line(reader)
-}
-
-fn send_raw_bytes(stream: &mut TcpStream, file: &String, update_date: bool, update_message_id: bool) -> CmdResult {
+fn send_raw_bytes(stream: &mut TcpStream, file: &str, update_date: bool, update_message_id: bool) -> CmdResult {
     println!("{}send: {}", get_current_id_prefix(), file);
 
     let buf = replace_raw_bytes(&fs::read(file)?, update_date, update_message_id)?;
@@ -287,39 +282,46 @@ fn send_raw_bytes(stream: &mut TcpStream, file: &String, update_date: bool, upda
     Ok("".to_string())
 }
 
-fn send_hello(reader: &mut TcpReader) -> CmdResult {
-    send_cmd(reader, "EHLO localhost")
+fn make_send_cmd<'a>(reader: &'a mut TcpReader) -> impl FnMut(&str) -> CmdResult + 'a {
+    move |cmd| {
+        send_line(reader.get_mut(), cmd)?;
+        recv_line(reader)
+    }
 }
 
-fn send_from(reader: &mut TcpReader, from_addr: &String) -> CmdResult {
-    send_cmd(reader, &format!("MAIL FROM: <{}>", from_addr))
+fn send_hello<F>(send: &mut F) -> CmdResult where F: FnMut(&str) -> CmdResult {
+    send("EHLO localhost")
 }
 
-fn send_rcpt_to(reader: &mut TcpReader, to_addrs: &Vec<String>) -> CmdResult {
+fn send_from<F>(send: &mut F, from_addr: &str) -> CmdResult where F: FnMut(&str) -> CmdResult {
+    send(&format!("MAIL FROM: <{}>", from_addr))
+}
+
+fn send_rcpt_to<F>(send: &mut F, to_addrs: &Vec<String>) -> CmdResult where F: FnMut(&str) -> CmdResult {
     for addr in to_addrs {
-        send_cmd(reader, &format!("RCPT TO: <{}>", addr))?;
+        send(&format!("RCPT TO: <{}>", addr))?;
     }
 
     Ok("".to_string())
 }
 
-fn send_data(reader: &mut TcpReader) -> CmdResult {
-    send_cmd(reader, "DATA")
+fn send_data<F>(send: &mut F) -> CmdResult where F: FnMut(&str) -> CmdResult {
+    send("DATA")
 }
 
-fn send_crlf_dot(reader: &mut TcpReader) -> CmdResult {
-    send_cmd(reader, &format!("{}.", CRLF))
+fn send_crlf_dot<F>(send: &mut F) -> CmdResult where F: FnMut(&str) -> CmdResult {
+    send(&format!("{}.", CRLF))
 }
 
-fn send_quit(reader: &mut TcpReader) -> CmdResult {
-    send_cmd(reader, "QUIT")
+fn send_quit<F>(send: &mut F) -> CmdResult where F: FnMut(&str) -> CmdResult {
+    send("QUIT")
 }
 
-fn send_rset(reader: &mut TcpReader) -> CmdResult {
-    send_cmd(reader, "RSET")
+fn send_rset<F>(send: &mut F) -> CmdResult where F: FnMut(&str) -> CmdResult {
+    send("RSET")
 }
 
-fn make_connect_addr(host: &String, port: u32) -> String {
+fn make_connect_addr(host: &str, port: u32) -> String {
     format!("{}:{}", host, port)
 }
 
@@ -330,7 +332,9 @@ fn send_messages(settings: &Settings, eml_files: &Vec<String>) -> SendEmlResult<
 
     let mut reader = BufReader::new(stream.try_clone()?);
     let _ = recv_line(&mut reader)?;
-    send_hello(&mut reader)?;
+    let mut send = make_send_cmd(&mut reader);
+
+    send_hello(&mut send)?;
 
     let mut mail_sent = false;
     for file in eml_files {
@@ -341,26 +345,26 @@ fn send_messages(settings: &Settings, eml_files: &Vec<String>) -> SendEmlResult<
 
         if mail_sent {
             println!("---");
-            send_rset(&mut reader)?;
+            send_rset(&mut send)?;
         }
 
-        send_from(&mut reader, settings.from_address.as_ref().unwrap())?;
-        send_rcpt_to(&mut reader, settings.to_address.as_ref().unwrap())?;
-        send_data(&mut reader)?;
+        send_from(&mut send, settings.from_address.as_ref().unwrap())?;
+        send_rcpt_to(&mut send, settings.to_address.as_ref().unwrap())?;
+        send_data(&mut send)?;
         send_raw_bytes(&mut stream, &file, settings.update_date.unwrap_or(true), settings.update_message_id.unwrap_or(true))?;
-        send_crlf_dot(&mut reader)?;
+        send_crlf_dot(&mut send)?;
         mail_sent = true;
     }
 
-    send_quit(&mut reader)?;
+    send_quit(&mut send)?;
     Ok(())
 }
 
-fn send_one_message(settings: &Settings, file: &String) -> SendEmlResult<()> {
+fn send_one_message(settings: &Settings, file: &str) -> SendEmlResult<()> {
     send_messages(settings, &vec![file.to_string()])
 }
 
-fn proc_json(json_file: &String) -> SendEmlResult<()> {
+fn proc_json(json_file: &str) -> SendEmlResult<()> {
     if !Path::new(json_file).is_file() {
         return Err(new_error("Json file does not exist"))
     }
@@ -448,16 +452,16 @@ test"#;
         make_invalid_mail().as_bytes().to_vec()
     }
 
-    fn get_message_id_line(header: &Vec<u8>) -> Option<String> {
-        let header_str = String::from_utf8(header.to_owned()).unwrap();
+    fn get_message_id_line(header: &[u8]) -> Option<String> {
+        let header_str = std::str::from_utf8(header).unwrap();
         let re = regex::Regex::new(r"Message-ID: \S+\r\n").unwrap();
-        re.find(&header_str).map(|m| m.as_str().to_string())
+        re.find(header_str).map(|m| m.as_str().to_string())
     }
 
-    fn get_date_line(header: &Vec<u8>) -> Option<String> {
-        let header_str = String::from_utf8(header.to_owned()).unwrap();
+    fn get_date_line(header: &[u8]) -> Option<String> {
+        let header_str = std::str::from_utf8(header).unwrap();
         let re = regex::Regex::new(r"Date: [\S ]+\r\n").unwrap();
-        re.find(&header_str).map(|m| m.as_str().to_string())
+        re.find(header_str).map(|m| m.as_str().to_string())
     }
 
     #[test]
@@ -476,21 +480,21 @@ test"#;
 
     #[test]
     fn replace_message_id_line_test() {
-        let mail = make_simple_mail_bytes();
-        let repl_mail = super::replace_message_id_line(&mail);
+        let (header, _) = super::split_mail(&make_simple_mail_bytes()).unwrap();
+        let repl_header = super::replace_message_id_line(&header);
 
-        let orig_line = get_message_id_line(&mail).unwrap();
-        let repl_line = get_message_id_line(&repl_mail).unwrap();
+        let orig_line = get_message_id_line(&header).unwrap();
+        let repl_line = get_message_id_line(&repl_header).unwrap();
         assert_ne!(orig_line, repl_line);
     }
 
     #[test]
     fn replace_date_line_test() {
-        let mail = make_simple_mail_bytes();
-        let repl_mail = super::replace_date_line(&mail);
+        let (header, _) = super::split_mail(&make_simple_mail_bytes()).unwrap();
+        let repl_header = super::replace_date_line(&header);
 
-        let orig_line = get_date_line(&mail).unwrap();
-        let repl_line = get_date_line(&repl_mail).unwrap();
+        let orig_line = get_date_line(&header).unwrap();
+        let repl_line = get_date_line(&repl_header).unwrap();
         assert_ne!(orig_line, repl_line);
     }
 
@@ -642,5 +646,54 @@ test"#;
         assert!(check_no_key("toAddress").is_err());
         assert!(check_no_key("emlFile").is_err());
         assert!(check_no_key("testKey").is_ok());
+    }
+
+    fn make_test_send_cmd<'a>(expected: &'a str) -> impl FnMut(&str) -> super::CmdResult + 'a {
+        move |cmd| {
+            assert_eq!(expected, cmd);
+            Ok(cmd.to_owned())
+        }
+    }
+
+    #[test]
+    fn send_hello_test() {
+        let _ = super::send_hello(&mut make_test_send_cmd("EHLO localhost"));
+    }
+
+    #[test]
+    fn send_from_test() {
+        let _ = super::send_from(&mut make_test_send_cmd("MAIL FROM: <a001@ah62.example.jp>"), "a001@ah62.example.jp");
+    }
+
+    #[test]
+    fn send_rcpt_test() {
+        let mut count = 1;
+        let mut test_func = |cmd: &str| {
+            assert_eq!(format!("RCPT TO: <a00{}@ah62.example.jp>", count), cmd);
+            count += 1;
+            Ok(cmd.to_owned())
+        };
+
+        let _ = super::send_rcpt_to(&mut test_func, &vec!["a001@ah62.example.jp".into(), "a002@ah62.example.jp".into(), "a003@ah62.example.jp".into()]);
+    }
+
+    #[test]
+    fn send_data_test() {
+        let _ = super::send_data(&mut make_test_send_cmd("DATA"));
+    }
+
+    #[test]
+    fn send_crlf_dot_test() {
+        let _ = super::send_crlf_dot(&mut make_test_send_cmd(&format!("{}.", super::CRLF)));
+    }
+
+    #[test]
+    fn send_quit_test() {
+        let _ = super::send_quit(&mut make_test_send_cmd("QUIT"));
+    }
+
+    #[test]
+    fn send_rset_test() {
+        let _ = super::send_rset(&mut make_test_send_cmd("RSET"));
     }
 }
