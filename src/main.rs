@@ -42,13 +42,13 @@ fn make_random_message_id_line() -> String {
 }
 
 fn replace_message_id_line(file_buf: &[u8]) -> std::borrow::Cow<[u8]> {
-    let re = regex::bytes::Regex::new(r"Message-ID: \S+\r\n").unwrap();
-    re.replace(file_buf, make_random_message_id_line().as_bytes())
+    let re = regex::bytes::Regex::new(r"Message-ID:[\s\S]+?\r\n([^ \t]|$)").unwrap();
+    re.replace(file_buf, format!("{}$1", make_random_message_id_line()).as_bytes())
 }
 
 fn replace_date_line(file_buf: &[u8]) -> std::borrow::Cow<[u8]> {
-    let re = regex::bytes::Regex::new(r"Date: [\S ]+\r\n").unwrap();
-    re.replace(&file_buf, make_now_date_line().as_bytes())
+    let re = regex::bytes::Regex::new(r"Date:[\s\S]+?\r\n([^ \t]|$)").unwrap();
+    re.replace(&file_buf, format!("{}$1", make_now_date_line()).as_bytes())
 }
 
 fn is_not_update(update_date: bool, update_message_id: bool) -> bool {
@@ -440,6 +440,64 @@ test"#;
         mail.replace("\n", "\r\n")
     }
 
+    fn make_folded_mail() -> String {
+        let mail = r#"From: a001 <a001@ah62.example.jp>
+Subject: test
+To: a002@ah62.example.jp
+Message-ID:
+ <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>
+Date:
+ Sun, 26 Jul 2020
+ 22:01:37 +0900
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:78.0) Gecko/20100101
+ Thunderbird/78.0.1
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8; format=flowed
+Content-Transfer-Encoding: 7bit
+Content-Language: en-US
+
+test"#;
+        mail.replace("\n", "\r\n")
+    }
+
+    fn make_folded_end_date() -> Vec<u8> {
+        let mail = r#"From: a001 <a001@ah62.example.jp>
+Subject: test
+To: a002@ah62.example.jp
+Message-ID:
+ <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:78.0) Gecko/20100101
+ Thunderbird/78.0.1
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8; format=flowed
+Content-Transfer-Encoding: 7bit
+Content-Language: en-US
+Date:
+ Sun, 26 Jul 2020
+ 22:01:37 +0900
+"#;
+        mail.replace("\n", "\r\n").as_bytes().to_vec()
+    }
+
+    fn make_folded_end_message_id() -> Vec<u8> {
+        let mail = r#"From: a001 <a001@ah62.example.jp>
+Subject: test
+To: a002@ah62.example.jp
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:78.0) Gecko/20100101
+ Thunderbird/78.0.1
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8; format=flowed
+Content-Transfer-Encoding: 7bit
+Content-Language: en-US
+Date:
+ Sun, 26 Jul 2020
+ 22:01:37 +0900
+Message-ID:
+ <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>
+"#;
+        mail.replace("\n", "\r\n").as_bytes().to_vec()
+    }
+
     fn make_simple_mail_bytes() -> Vec<u8> {
         make_simple_mail().as_bytes().to_vec()
     }
@@ -452,30 +510,40 @@ test"#;
         make_invalid_mail().as_bytes().to_vec()
     }
 
-    fn get_message_id_line(header: &[u8]) -> Option<String> {
+    fn make_folded_mail_bytes() -> Vec<u8> {
+        make_folded_mail().as_bytes().to_vec()
+    }
+
+    fn get_header_line(header: &[u8], name: &str) -> Option<String> {
         let header_str = std::str::from_utf8(header).unwrap();
-        let re = regex::Regex::new(r"Message-ID: \S+\r\n").unwrap();
-        re.find(header_str).map(|m| m.as_str().to_string())
+        let re = regex::Regex::new(&format!(r"({}:[\s\S]+?\r\n)([^ \t]|$)", name)).unwrap();
+        let caps = re.captures(header_str).unwrap();
+        caps.get(1).map(|c| c.as_str().to_string())
+    }
+
+    fn get_message_id_line(header: &[u8]) -> Option<String> {
+        return get_header_line(header, "Message-ID")
     }
 
     fn get_date_line(header: &[u8]) -> Option<String> {
-        let header_str = std::str::from_utf8(header).unwrap();
-        let re = regex::Regex::new(r"Date: [\S ]+\r\n").unwrap();
-        re.find(header_str).map(|m| m.as_str().to_string())
+        return get_header_line(header, "Date")
     }
 
     #[test]
-    fn get_message_id_line_test() {
+    fn get_header_line_test() {
         let mail = make_simple_mail_bytes();
-        let (header, _) = super::split_mail(&mail).unwrap();
-        assert_eq!("Message-ID: <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_message_id_line(&header).unwrap());
-    }
+        assert_eq!("Message-ID: <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_header_line(&mail, "Message-ID").unwrap());
+        assert_eq!("Date: Sun, 26 Jul 2020 22:01:37 +0900\r\n", get_header_line(&mail, "Date").unwrap());
 
-    #[test]
-    fn get_date_line_test() {
-        let mail = make_simple_mail_bytes();
-        let (header, _) = super::split_mail(&mail).unwrap();
-        assert_eq!("Date: Sun, 26 Jul 2020 22:01:37 +0900\r\n", get_date_line(&header).unwrap())
+        let folded_mail = make_folded_mail_bytes();
+        assert_eq!("Message-ID:\r\n <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_header_line(&folded_mail, "Message-ID").unwrap());
+        assert_eq!("Date:\r\n Sun, 26 Jul 2020\r\n 22:01:37 +0900\r\n", get_header_line(&folded_mail, "Date").unwrap());
+
+        let folded_end_message_id = make_folded_end_message_id();
+        assert_eq!("Message-ID:\r\n <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_header_line(&folded_end_message_id, "Message-ID").unwrap());
+
+        let folded_end_date = make_folded_end_date();
+        assert_eq!("Date:\r\n Sun, 26 Jul 2020\r\n 22:01:37 +0900\r\n", get_header_line(&folded_end_date, "Date").unwrap());
     }
 
     #[test]
@@ -486,6 +554,9 @@ test"#;
         let orig_line = get_message_id_line(&header).unwrap();
         let repl_line = get_message_id_line(&repl_header).unwrap();
         assert_ne!(orig_line, repl_line);
+
+        let date_line = get_header_line(&repl_header, "Date");
+        assert!(date_line.is_some());
     }
 
     #[test]
@@ -496,6 +567,9 @@ test"#;
         let orig_line = get_date_line(&header).unwrap();
         let repl_line = get_date_line(&repl_header).unwrap();
         assert_ne!(orig_line, repl_line);
+
+        let user_agent_line = get_header_line(&repl_header, "User-Agent");
+        assert!(user_agent_line.is_some());
     }
 
     #[test]
@@ -546,23 +620,27 @@ test"#;
         let repl_header = super::replace_header(&header, false, false);
         assert_eq!(header, repl_header);
 
-        let replace = |update_date: bool, update_message_id: bool| -> (String, String) {
-            let r_header = super::replace_header(&header, update_date, update_message_id);
-            assert_ne!(header, r_header);
+        let replace = |header: &Vec<u8>, update_date: bool, update_message_id: bool| -> (String, String) {
+            let r_header = super::replace_header(header, update_date, update_message_id);
             (get_date_line(&r_header).unwrap(), get_message_id_line(&r_header).unwrap())
         };
 
-        let (r_date_line, r_mid_line) = replace(true, true);
+        let (r_date_line, r_mid_line) = replace(&header, true, true);
         assert_ne!(date_line, r_date_line);
         assert_ne!(mid_line, r_mid_line);
 
-        let (r_date_line, r_mid_line) = replace(true, false);
+        let (r_date_line, r_mid_line) = replace(&header, true, false);
         assert_ne!(date_line, r_date_line);
         assert_eq!(mid_line, r_mid_line);
 
-        let (r_date_line, r_mid_line) = replace(false, true);
+        let (r_date_line, r_mid_line) = replace(&header, false, true);
         assert_eq!(date_line, r_date_line);
         assert_ne!(mid_line, r_mid_line);
+
+        let (folded_header, _) = super::split_mail(&make_folded_mail_bytes()).unwrap();
+        let (f_date_line, f_mid_line) = replace(&folded_header, true, true);
+        assert_eq!(1, f_date_line.chars().filter(|&c| c == '\n').count());
+        assert_eq!(1, f_mid_line.chars().filter(|&c| c == '\n').count());
     }
 
     #[test]
