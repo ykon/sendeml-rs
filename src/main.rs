@@ -423,7 +423,7 @@ mod tests {
         assert!(line.len() <= 80);
     }
 
-    fn make_simple_mail() -> String {
+    fn make_simple_mail_text() -> String {
         let mail = r#"From: a001 <a001@ah62.example.jp>
 Subject: test
 To: a002@ah62.example.jp
@@ -440,7 +440,7 @@ test"#;
         mail.replace("\n", "\r\n")
     }
 
-    fn make_folded_mail() -> String {
+    fn make_folded_mail() -> Vec<u8> {
         let mail = r#"From: a001 <a001@ah62.example.jp>
 Subject: test
 To: a002@ah62.example.jp
@@ -457,7 +457,7 @@ Content-Transfer-Encoding: 7bit
 Content-Language: en-US
 
 test"#;
-        mail.replace("\n", "\r\n")
+        mail.replace("\n", "\r\n").as_bytes().to_vec()
     }
 
     fn make_folded_end_date() -> Vec<u8> {
@@ -498,20 +498,12 @@ Message-ID:
         mail.replace("\n", "\r\n").as_bytes().to_vec()
     }
 
-    fn make_simple_mail_bytes() -> Vec<u8> {
-        make_simple_mail().as_bytes().to_vec()
+    fn make_simple_mail() -> Vec<u8> {
+        make_simple_mail_text().as_bytes().to_vec()
     }
 
-    fn make_invalid_mail() -> String {
-        make_simple_mail().replace("\r\n\r\n", "")
-    }
-
-    fn make_invalid_mail_bytes() -> Vec<u8> {
-        make_invalid_mail().as_bytes().to_vec()
-    }
-
-    fn make_folded_mail_bytes() -> Vec<u8> {
-        make_folded_mail().as_bytes().to_vec()
+    fn make_invalid_mail() -> Vec<u8> {
+        make_simple_mail_text().replace("\r\n\r\n", "").as_bytes().to_vec()
     }
 
     fn get_header_line(header: &[u8], name: &str) -> Option<String> {
@@ -531,24 +523,24 @@ Message-ID:
 
     #[test]
     fn get_header_line_test() {
-        let mail = make_simple_mail_bytes();
+        let mail = make_simple_mail();
         assert_eq!("Message-ID: <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_header_line(&mail, "Message-ID").unwrap());
         assert_eq!("Date: Sun, 26 Jul 2020 22:01:37 +0900\r\n", get_header_line(&mail, "Date").unwrap());
 
-        let folded_mail = make_folded_mail_bytes();
+        let folded_mail = make_folded_mail();
         assert_eq!("Message-ID:\r\n <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_header_line(&folded_mail, "Message-ID").unwrap());
         assert_eq!("Date:\r\n Sun, 26 Jul 2020\r\n 22:01:37 +0900\r\n", get_header_line(&folded_mail, "Date").unwrap());
 
-        let folded_end_message_id = make_folded_end_message_id();
-        assert_eq!("Message-ID:\r\n <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_header_line(&folded_end_message_id, "Message-ID").unwrap());
+        let end_message_id = make_folded_end_message_id();
+        assert_eq!("Message-ID:\r\n <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_header_line(&end_message_id, "Message-ID").unwrap());
 
-        let folded_end_date = make_folded_end_date();
-        assert_eq!("Date:\r\n Sun, 26 Jul 2020\r\n 22:01:37 +0900\r\n", get_header_line(&folded_end_date, "Date").unwrap());
+        let end_date = make_folded_end_date();
+        assert_eq!("Date:\r\n Sun, 26 Jul 2020\r\n 22:01:37 +0900\r\n", get_header_line(&end_date, "Date").unwrap());
     }
 
     #[test]
     fn replace_message_id_line_test() {
-        let (header, _) = super::split_mail(&make_simple_mail_bytes()).unwrap();
+        let (header, _) = super::split_mail(&make_simple_mail()).unwrap();
         let repl_header = super::replace_message_id_line(&header);
 
         let orig_line = get_message_id_line(&header).unwrap();
@@ -561,7 +553,7 @@ Message-ID:
 
     #[test]
     fn replace_date_line_test() {
-        let (header, _) = super::split_mail(&make_simple_mail_bytes()).unwrap();
+        let (header, _) = super::split_mail(&make_simple_mail()).unwrap();
         let repl_header = super::replace_date_line(&header);
 
         let orig_line = get_date_line(&header).unwrap();
@@ -582,7 +574,7 @@ Message-ID:
 
     #[test]
     fn combine_mail_test() {
-        let mail = make_simple_mail_bytes();
+        let mail = make_simple_mail();
         let (header, body) = super::split_mail(&mail).unwrap();
         let new_mail = super::combine_mail(&header, &body);
         assert_eq!(mail, new_mail);
@@ -590,16 +582,16 @@ Message-ID:
 
     #[test]
     fn find_empty_line_test() {
-        let mail = make_simple_mail_bytes();
+        let mail = make_simple_mail();
         assert_eq!(414, super::find_empty_line(&mail).unwrap());
 
-        let invalid_mail = make_invalid_mail_bytes();
+        let invalid_mail = make_invalid_mail();
         assert!(super::find_empty_line(&invalid_mail).is_none());
     }
 
     #[test]
     fn split_mail_test() {
-        let mail = make_simple_mail_bytes();
+        let mail = make_simple_mail();
         let header_body = super::split_mail(&mail);
         assert!(header_body.is_some());
 
@@ -607,13 +599,13 @@ Message-ID:
         assert_eq!(mail.iter().take(414).copied().collect::<Vec<_>>(), header);
         assert_eq!(mail.iter().skip(414 + 4).copied().collect::<Vec<_>>(), body);
 
-        let invalid_mail = make_invalid_mail_bytes();
+        let invalid_mail = make_invalid_mail();
         assert!(super::split_mail(&invalid_mail).is_none());
     }
 
     #[test]
     fn replace_header_test() {
-        let (header, _) = super::split_mail(&make_simple_mail_bytes()).unwrap();
+        let (header, _) = super::split_mail(&make_simple_mail()).unwrap();
         let date_line = get_date_line(&header).unwrap();
         let mid_line = get_message_id_line(&header).unwrap();
 
@@ -637,7 +629,7 @@ Message-ID:
         assert_eq!(date_line, r_date_line);
         assert_ne!(mid_line, r_mid_line);
 
-        let (folded_header, _) = super::split_mail(&make_folded_mail_bytes()).unwrap();
+        let (folded_header, _) = super::split_mail(&make_folded_mail()).unwrap();
         let (f_date_line, f_mid_line) = replace(&folded_header, true, true);
         assert_eq!(1, f_date_line.chars().filter(|&c| c == '\n').count());
         assert_eq!(1, f_mid_line.chars().filter(|&c| c == '\n').count());
@@ -645,11 +637,11 @@ Message-ID:
 
     #[test]
     fn replace_raw_bytes_test() {
-        let mail = make_simple_mail_bytes();
+        let mail = make_simple_mail();
         let repl_mail = super::replace_raw_bytes(&mail, false, false).unwrap();
         assert_eq!(mail, repl_mail);
 
-        let invalid_mail = make_invalid_mail_bytes();
+        let invalid_mail = make_invalid_mail();
         assert!(super::replace_raw_bytes(&invalid_mail, true, true).is_err());
 
         let repl_mail = super::replace_raw_bytes(&mail, true, true).unwrap();
