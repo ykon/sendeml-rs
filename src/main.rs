@@ -3,9 +3,6 @@
  * Licensed under the MIT License.
  */
 
-#[macro_use]
-extern crate lazy_static;
-
 use std::env;
 use std::fs;
 use std::fmt;
@@ -14,14 +11,11 @@ use std::io::prelude::*;
 use std::net::TcpStream;
 use std::path::Path;
 use std::process;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
 use chrono::prelude::*;
 use rand::{thread_rng, Rng};
 use rand::distributions::Alphanumeric;
 use rayon::prelude::*;
-use serde::Deserialize;
 
 const CR: u8 = b'\r';
 const LF: u8 = b'\n';
@@ -83,7 +77,7 @@ fn replace_header(header: &[u8], update_date: bool, update_message_id: bool) -> 
     }
 }
 
-fn replace_raw_bytes(file_buf: &[u8], update_date: bool, update_message_id: bool) -> SendEmlResult<Vec<u8>> {
+fn replace_mail(file_buf: &[u8], update_date: bool, update_message_id: bool) -> SendEmlResult<Vec<u8>> {
     if is_not_update(update_date, update_message_id) {
         return Ok(file_buf.to_owned())
     }
@@ -131,29 +125,23 @@ fn print_version() {
     println!("SendEML / Version: {0:.1}", VERSION);
 }
 
-lazy_static! {
-    static ref USE_PARALLEL: AtomicBool = AtomicBool::new(false);
-}
-
-fn get_current_id_prefix() -> String {
-    return if (*USE_PARALLEL).load(Ordering::Relaxed) {
+fn make_id_prefix(use_parallel: bool) -> String {
+    return if use_parallel {
         format!("{:?}, ", thread::current().id())
     } else {
         "".to_string()
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct Settings {
-    smtp_host: Option<String>,
-    smtp_port: Option<u32>,
-    from_address: Option<String>,
-    to_address: Option<Vec<String>>,
-    eml_file: Option<Vec<String>>,
-    update_date: Option<bool>,
-    update_message_id: Option<bool>,
-    use_parallel: Option<bool>
+    smtp_host: String,
+    smtp_port: u32,
+    from_address: String,
+    to_address: Vec<String>,
+    eml_file: Vec<String>,
+    update_date: bool,
+    update_message_id: bool,
+    use_parallel: bool
 }
 
 #[derive(Debug)]
@@ -188,46 +176,63 @@ impl From<std::io::Error> for SendEmlError {
 }
 
 fn new_error(msg: &str) -> SendEmlError {
-    SendEmlError::StrError(msg.to_string())
+    SendEmlError::StrError(msg.to_owned())
 }
 
-fn get_settings_from_text(text: &str) -> SendEmlResult<Settings> {
+fn get_settings_from_text(text: &str) -> SendEmlResult<serde_json::Value> {
     serde_json::from_str(text).map_err(|e| SendEmlError::JsonError(e))
 }
 
-fn get_settings(json_file: &str) -> SendEmlResult<Settings> {
+fn get_settings(json_file: &str) -> SendEmlResult<serde_json::Value> {
     get_settings_from_text(&fs::read_to_string(json_file)?)
 }
 
-fn check_settings(settings: Settings) -> SendEmlResult<Settings> {
-    fn get_null_key(s: &Settings) -> &str {
-        return if s.smtp_host.is_none() {
-            "smtpHost"
-        } else if s.smtp_port.is_none() {
-            "smtpPort"
-        } else if s.from_address.is_none() {
-            "fromAddress"
-        } else if s.to_address.is_none() {
-            "toAddress"
-        } else if s.eml_file.is_none() {
-            "emlFile"
-        } else {
-            ""
-        }
+fn check_json_value(json: &serde_json::Value, name: &str, check: for<'r> fn(&'r serde_json::Value) -> bool) -> SendEmlResult<()> {
+    match json.get(name) {
+        Some(v) if !check(v) => {
+            Err(new_error(&format!("{}: Invalied type", name)))
+        },
+        _ => Ok(())
+    }
+}
+
+fn check_json_array_value(json: &serde_json::Value, name: &str, check: for<'r> fn(&'r serde_json::Value) -> bool) -> SendEmlResult<()> {
+    match json.get(name) {
+        Some(v) => {
+            if !v.is_array() {
+                return Err(new_error(&format!("{}: Invalied type (array)", name)))
+            }
+            if let Some(elm) = v.as_array().unwrap().iter().find(|v| !check(v)) {
+                return Err(new_error(&format!("{}: Invalied type (element): {:?}", name, elm)))
+            }
+            Ok(())
+        },
+        _ => Ok(())
+    }
+}
+
+fn check_settings(json: &serde_json::Value) -> SendEmlResult<()> {
+    let names = ["smtpHost", "smtpPort", "fromAddress", "toAddress", "emlFile"];
+    if let Some(key) = names.iter().find(|n| json.get(n).is_none()) {
+        return Err(new_error(&format!("{} key does not exist", key)))
     }
 
-    match get_null_key(&settings) {
-        "" => Ok(settings),
-        key => Err(new_error(&format!("{} key does not exist", key)))
-    }
+    check_json_value(json, "smtpHost", serde_json::Value::is_string)?;
+    check_json_value(json, "smtpPort", serde_json::Value::is_number)?;
+    check_json_value(json, "fromAddress", serde_json::Value::is_string)?;
+    check_json_array_value(json, "toAddress", serde_json::Value::is_string)?;
+    check_json_array_value(json, "emlFile", serde_json::Value::is_string)?;
+    check_json_value(json, "updateDate", serde_json::Value::is_boolean)?;
+    check_json_value(json, "updateMessageId", serde_json::Value::is_boolean)?;
+    check_json_value(json, "useParallel", serde_json::Value::is_boolean)
 }
 
 fn replace_crlf_dot(cmd: &str) -> String {
     (if cmd == format!("{}.", CRLF) { "<CRLF>." } else { cmd }).to_string()
 }
 
-fn send_line(stream: &mut TcpStream, cmd: &str) -> SendEmlResult<()> {
-    println!("{}send: {}", get_current_id_prefix(), replace_crlf_dot(cmd));
+fn send_line(stream: &mut TcpStream, cmd: &str, use_parallel: bool) -> SendEmlResult<()> {
+    println!("{}send: {}", make_id_prefix(use_parallel), replace_crlf_dot(cmd));
 
     stream.write_all(format!("{}{}", cmd, CRLF).as_bytes())?;
     stream.flush()?;
@@ -250,7 +255,7 @@ fn is_positive_reply(line: &str) -> bool {
 type TcpReader = BufReader<TcpStream>;
 type CmdResult = Result<String, SendEmlError>;
 
-fn recv_line(reader: &mut TcpReader) -> CmdResult {
+fn recv_line(reader: &mut TcpReader, use_parallel: bool) -> CmdResult {
     let mut line = String::new();
 
     loop {
@@ -260,7 +265,7 @@ fn recv_line(reader: &mut TcpReader) -> CmdResult {
         }
 
         line = line.trim().to_string();
-        println!("{}recv: {}", get_current_id_prefix(), line);
+        println!("{}recv: {}", make_id_prefix(use_parallel), line);
         if is_last_reply(&line) {
             return if is_positive_reply(&line) {
                 Ok(line)
@@ -272,20 +277,20 @@ fn recv_line(reader: &mut TcpReader) -> CmdResult {
     }
 }
 
-fn send_raw_bytes(stream: &mut TcpStream, file: &str, update_date: bool, update_message_id: bool) -> CmdResult {
-    println!("{}send: {}", get_current_id_prefix(), file);
+fn send_mail(stream: &mut TcpStream, file: &str, update_date: bool, update_message_id: bool, use_parallel: bool) -> CmdResult {
+    println!("{}send: {}", make_id_prefix(use_parallel), file);
 
-    let buf = replace_raw_bytes(&fs::read(file)?, update_date, update_message_id)?;
+    let buf = replace_mail(&fs::read(file)?, update_date, update_message_id)?;
     stream.write_all(&buf)?;
     stream.flush()?;
 
     Ok("".to_string())
 }
 
-fn make_send_cmd<'a>(reader: &'a mut TcpReader) -> impl FnMut(&str) -> CmdResult + 'a {
+fn make_send_cmd<'a>(reader: &'a mut TcpReader, use_parallel: bool) -> impl FnMut(&str) -> CmdResult + 'a {
     move |cmd| {
-        send_line(reader.get_mut(), cmd)?;
-        recv_line(reader)
+        send_line(reader.get_mut(), cmd, use_parallel)?;
+        recv_line(reader, use_parallel)
     }
 }
 
@@ -326,42 +331,53 @@ fn make_connect_addr(host: &str, port: u32) -> String {
 }
 
 fn send_messages(settings: &Settings, eml_files: &Vec<String>) -> SendEmlResult<()> {
-    let addr = make_connect_addr(settings.smtp_host.as_ref().unwrap(), settings.smtp_port.unwrap());
+    let addr = make_connect_addr(&settings.smtp_host, settings.smtp_port);
     let mut stream = TcpStream::connect(addr)?;
-    stream.set_read_timeout(Some(Duration::new(1000, 0)))?;
-
     let mut reader = BufReader::new(stream.try_clone()?);
-    let _ = recv_line(&mut reader)?;
-    let mut send = make_send_cmd(&mut reader);
+    let _ = recv_line(&mut reader, settings.use_parallel)?;
+    let mut send = make_send_cmd(&mut reader, settings.use_parallel);
 
     send_hello(&mut send)?;
 
-    let mut mail_sent = false;
+    let mut reset = false;
     for file in eml_files {
         if !Path::new(&file).is_file() {
             println!("{}: EML file does not exist", file);
             continue;
         }
 
-        if mail_sent {
+        if reset {
             println!("---");
             send_rset(&mut send)?;
+        } else {
+            reset = true;
         }
 
-        send_from(&mut send, settings.from_address.as_ref().unwrap())?;
-        send_rcpt_to(&mut send, settings.to_address.as_ref().unwrap())?;
+        send_from(&mut send, &settings.from_address)?;
+        send_rcpt_to(&mut send, &settings.to_address)?;
         send_data(&mut send)?;
-        send_raw_bytes(&mut stream, &file, settings.update_date.unwrap_or(true), settings.update_message_id.unwrap_or(true))?;
+
+        send_mail(&mut stream, &file, settings.update_date, settings.update_message_id, settings.use_parallel)
+            .map_err(|e| new_error(&format!("{}: {}", file, e)))?;
+
         send_crlf_dot(&mut send)?;
-        mail_sent = true;
     }
 
     send_quit(&mut send)?;
     Ok(())
 }
 
-fn send_one_message(settings: &Settings, file: &str) -> SendEmlResult<()> {
-    send_messages(settings, &vec![file.to_string()])
+fn map_settings(json: serde_json::Value) -> Settings {
+    Settings {
+        smtp_host: json["smtpHost"].as_str().unwrap().to_string(),
+        smtp_port: json["smtpPort"].as_u64().unwrap() as u32,
+        from_address: json["fromAddress"].as_str().unwrap().to_string(),
+        to_address: json["toAddress"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect(),
+        eml_file: json["emlFile"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect(),
+        update_date: json.get("updateDate").map(|v| v.as_bool().unwrap()).unwrap_or(true),
+        update_message_id: json.get("updateMessageId").map(|v| v.as_bool().unwrap()).unwrap_or(true),
+        use_parallel: json.get("useParallel").map(|v| v.as_bool().unwrap()).unwrap_or(false)
+    }
 }
 
 fn proc_json(json_file: &str) -> SendEmlResult<()> {
@@ -369,14 +385,15 @@ fn proc_json(json_file: &str) -> SendEmlResult<()> {
         return Err(new_error("Json file does not exist"))
     }
 
-    let settings = check_settings(get_settings(json_file)?)?;
-    let eml_files = settings.eml_file.as_ref().unwrap();
+    let json = get_settings(json_file)?;
+    check_settings(&json)?;
+    let settings = map_settings(json);
+    let eml_files = &settings.eml_file;
 
-    if settings.use_parallel.unwrap_or(false) {
-        (*USE_PARALLEL).store(true, Ordering::Relaxed);
+    if settings.use_parallel {
         eml_files.par_iter().for_each(|file| {
-            if let Err(e) = send_one_message(&settings, file) {
-                println!("{}: {}", json_file, e);
+            if let Err(e) = send_messages(&settings, &vec![file.to_string()]) {
+                println!("error: {}: {}", json_file, e);
             }
         });
     } else {
@@ -400,7 +417,7 @@ fn main() {
 
     for json_file in &args[1..] {
         if let Err(e) = proc_json(json_file) {
-            println!("{}: {}", json_file, e);
+            println!("error: {}: {}", json_file, e);
         }
     }
 }
@@ -524,18 +541,18 @@ Message-ID:
     #[test]
     fn get_header_line_test() {
         let mail = make_simple_mail();
-        assert_eq!("Message-ID: <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_header_line(&mail, "Message-ID").unwrap());
-        assert_eq!("Date: Sun, 26 Jul 2020 22:01:37 +0900\r\n", get_header_line(&mail, "Date").unwrap());
+        assert_eq!("Date: Sun, 26 Jul 2020 22:01:37 +0900\r\n", get_date_line(&mail).unwrap());
+        assert_eq!("Message-ID: <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_message_id_line(&mail).unwrap());
 
-        let folded_mail = make_folded_mail();
-        assert_eq!("Message-ID:\r\n <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_header_line(&folded_mail, "Message-ID").unwrap());
-        assert_eq!("Date:\r\n Sun, 26 Jul 2020\r\n 22:01:37 +0900\r\n", get_header_line(&folded_mail, "Date").unwrap());
+        let f_mail = make_folded_mail();
+        assert_eq!("Date:\r\n Sun, 26 Jul 2020\r\n 22:01:37 +0900\r\n", get_date_line(&f_mail).unwrap());
+        assert_eq!("Message-ID:\r\n <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_message_id_line(&f_mail).unwrap());
 
-        let end_message_id = make_folded_end_message_id();
-        assert_eq!("Message-ID:\r\n <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_header_line(&end_message_id, "Message-ID").unwrap());
+        let e_date = make_folded_end_date();
+        assert_eq!("Date:\r\n Sun, 26 Jul 2020\r\n 22:01:37 +0900\r\n", get_date_line(&e_date).unwrap());
 
-        let end_date = make_folded_end_date();
-        assert_eq!("Date:\r\n Sun, 26 Jul 2020\r\n 22:01:37 +0900\r\n", get_header_line(&end_date, "Date").unwrap());
+        let e_message_id = make_folded_end_message_id();
+        assert_eq!("Message-ID:\r\n <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_message_id_line(&e_message_id).unwrap());
     }
 
     #[test]
@@ -636,15 +653,15 @@ Message-ID:
     }
 
     #[test]
-    fn replace_raw_bytes_test() {
+    fn replace_mail_test() {
         let mail = make_simple_mail();
-        let repl_mail = super::replace_raw_bytes(&mail, false, false).unwrap();
+        let repl_mail = super::replace_mail(&mail, false, false).unwrap();
         assert_eq!(mail, repl_mail);
 
         let invalid_mail = make_invalid_mail();
-        assert!(super::replace_raw_bytes(&invalid_mail, true, true).is_err());
+        assert!(super::replace_mail(&invalid_mail, true, true).is_err());
 
-        let repl_mail = super::replace_raw_bytes(&mail, true, true).unwrap();
+        let repl_mail = super::replace_mail(&mail, true, true).unwrap();
         assert_ne!(mail, repl_mail);
 
         let mail_last100 = mail[(mail.len() - 100)..mail.len()].to_vec();
@@ -680,34 +697,34 @@ Message-ID:
     }
 
     #[test]
-    fn get_settings_from_text_test() {
+    fn get_and_map_settings() {
         let json = super::make_json_sample();
-        let settings = super::get_settings_from_text(&json).unwrap();
+        let settings = super::map_settings(super::get_settings_from_text(&json).unwrap());
 
-        assert_eq!("172.16.3.151", settings.smtp_host.as_deref().unwrap());
-        assert_eq!(25, settings.smtp_port.unwrap());
-        assert_eq!("a001@ah62.example.jp", settings.from_address.as_deref().unwrap());
+        assert_eq!("172.16.3.151", settings.smtp_host);
+        assert_eq!(25, settings.smtp_port);
+        assert_eq!("a001@ah62.example.jp", settings.from_address);
 
         let to_addr1: Vec<String> = vec!["a001@ah62.example.jp", "a002@ah62.example.jp", "a003@ah62.example.jp"].iter().map(|s| s.to_string()).collect();
-        let to_addr2: Vec<String> = settings.to_address.unwrap();
+        let to_addr2: Vec<String> = settings.to_address;
         assert_eq!(to_addr1, to_addr2);
 
         let eml_file1: Vec<String> = vec!["test1.eml", "test2.eml", "test3.eml"].iter().map(|s| s.to_string()).collect();
-        let eml_file2: Vec<String> = settings.eml_file.unwrap();
+        let eml_file2: Vec<String> = settings.eml_file;
         assert_eq!(eml_file1, eml_file2);
 
-        assert_eq!(true, settings.update_date.unwrap());
-        assert_eq!(true, settings.update_message_id.unwrap());
-        assert_eq!(false, settings.use_parallel.unwrap());
+        assert_eq!(true, settings.update_date);
+        assert_eq!(true, settings.update_message_id);
+        assert_eq!(false, settings.use_parallel);
     }
 
     #[test]
     fn check_settings_test() {
-        fn check_no_key(key: &str) -> super::SendEmlResult<super::Settings> {
+        fn check_no_key(key: &str) -> super::SendEmlResult<()> {
             let json = super::make_json_sample();
             let re = regex::Regex::new(key).unwrap();
             let no_key = re.replace(&json, format!("X-{}", key).as_str());
-            super::check_settings(super::get_settings_from_text(&no_key.to_string()).unwrap())
+            super::check_settings(&super::get_settings_from_text(&no_key.to_string()).unwrap())
         }
 
         assert!(check_no_key("smtpHost").is_err());
@@ -715,7 +732,9 @@ Message-ID:
         assert!(check_no_key("fromAddress").is_err());
         assert!(check_no_key("toAddress").is_err());
         assert!(check_no_key("emlFile").is_err());
-        assert!(check_no_key("testKey").is_ok());
+        assert!(check_no_key("updateDate").is_ok());
+        assert!(check_no_key("updateMessageId").is_ok());
+        assert!(check_no_key("useParallel").is_ok());
     }
 
     fn make_test_send_cmd<'a>(expected: &'a str) -> impl FnMut(&str) -> super::CmdResult + 'a {
