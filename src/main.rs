@@ -190,7 +190,7 @@ fn get_settings(json_file: &str) -> SendEmlResult<serde_json::Value> {
 fn check_json_value(json: &serde_json::Value, name: &str, check: for<'r> fn(&'r serde_json::Value) -> bool) -> SendEmlResult<()> {
     match json.get(name) {
         Some(v) if !check(v) => {
-            Err(new_error(&format!("{}: Invalied type", name)))
+            Err(new_error(&format!("{}: Invalid type: {}", name, v)))
         },
         _ => Ok(())
     }
@@ -200,10 +200,10 @@ fn check_json_array_value(json: &serde_json::Value, name: &str, check: for<'r> f
     match json.get(name) {
         Some(v) => {
             if !v.is_array() {
-                return Err(new_error(&format!("{}: Invalied type (array)", name)))
+                return Err(new_error(&format!("{}: Invalid type (array): {}", name, v)))
             }
             if let Some(elm) = v.as_array().unwrap().iter().find(|v| !check(v)) {
-                return Err(new_error(&format!("{}: Invalied type (element): {:?}", name, elm)))
+                return Err(new_error(&format!("{}: Invalid type (element): {}", name, elm)))
             }
             Ok(())
         },
@@ -225,6 +225,19 @@ fn check_settings(json: &serde_json::Value) -> SendEmlResult<()> {
     check_json_value(json, "updateDate", serde_json::Value::is_boolean)?;
     check_json_value(json, "updateMessageId", serde_json::Value::is_boolean)?;
     check_json_value(json, "useParallel", serde_json::Value::is_boolean)
+}
+
+fn map_settings(json: serde_json::Value) -> Settings {
+    Settings {
+        smtp_host: json["smtpHost"].as_str().unwrap().to_string(),
+        smtp_port: json["smtpPort"].as_u64().unwrap() as u32,
+        from_address: json["fromAddress"].as_str().unwrap().to_string(),
+        to_address: json["toAddress"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect(),
+        eml_file: json["emlFile"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect(),
+        update_date: json.get("updateDate").map(|v| v.as_bool().unwrap()).unwrap_or(true),
+        update_message_id: json.get("updateMessageId").map(|v| v.as_bool().unwrap()).unwrap_or(true),
+        use_parallel: json.get("useParallel").map(|v| v.as_bool().unwrap()).unwrap_or(false)
+    }
 }
 
 fn replace_crlf_dot(cmd: &str) -> String {
@@ -330,12 +343,12 @@ fn make_connect_addr(host: &str, port: u32) -> String {
     format!("{}:{}", host, port)
 }
 
-fn send_messages(settings: &Settings, eml_files: &Vec<String>) -> SendEmlResult<()> {
+fn send_messages(settings: &Settings, eml_files: &Vec<String>, use_parallel: bool) -> SendEmlResult<()> {
     let addr = make_connect_addr(&settings.smtp_host, settings.smtp_port);
     let mut stream = TcpStream::connect(addr)?;
     let mut reader = BufReader::new(stream.try_clone()?);
-    let _ = recv_line(&mut reader, settings.use_parallel)?;
-    let mut send = make_send_cmd(&mut reader, settings.use_parallel);
+    let _ = recv_line(&mut reader, use_parallel)?;
+    let mut send = make_send_cmd(&mut reader, use_parallel);
 
     send_hello(&mut send)?;
 
@@ -349,35 +362,21 @@ fn send_messages(settings: &Settings, eml_files: &Vec<String>) -> SendEmlResult<
         if reset {
             println!("---");
             send_rset(&mut send)?;
-        } else {
-            reset = true;
         }
 
         send_from(&mut send, &settings.from_address)?;
         send_rcpt_to(&mut send, &settings.to_address)?;
         send_data(&mut send)?;
 
-        send_mail(&mut stream, &file, settings.update_date, settings.update_message_id, settings.use_parallel)
+        send_mail(&mut stream, &file, settings.update_date, settings.update_message_id, use_parallel)
             .map_err(|e| new_error(&format!("{}: {}", file, e)))?;
 
         send_crlf_dot(&mut send)?;
+        reset = true;
     }
 
     send_quit(&mut send)?;
     Ok(())
-}
-
-fn map_settings(json: serde_json::Value) -> Settings {
-    Settings {
-        smtp_host: json["smtpHost"].as_str().unwrap().to_string(),
-        smtp_port: json["smtpPort"].as_u64().unwrap() as u32,
-        from_address: json["fromAddress"].as_str().unwrap().to_string(),
-        to_address: json["toAddress"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect(),
-        eml_file: json["emlFile"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect(),
-        update_date: json.get("updateDate").map(|v| v.as_bool().unwrap()).unwrap_or(true),
-        update_message_id: json.get("updateMessageId").map(|v| v.as_bool().unwrap()).unwrap_or(true),
-        use_parallel: json.get("useParallel").map(|v| v.as_bool().unwrap()).unwrap_or(false)
-    }
 }
 
 fn proc_json(json_file: &str) -> SendEmlResult<()> {
@@ -390,14 +389,14 @@ fn proc_json(json_file: &str) -> SendEmlResult<()> {
     let settings = map_settings(json);
     let eml_files = &settings.eml_file;
 
-    if settings.use_parallel {
+    if settings.use_parallel && settings.eml_file.len() > 1 {
         eml_files.par_iter().for_each(|file| {
-            if let Err(e) = send_messages(&settings, &vec![file.to_string()]) {
+            if let Err(e) = send_messages(&settings, &vec![file.to_string()], true) {
                 println!("error: {}: {}", json_file, e);
             }
         });
     } else {
-        send_messages(&settings, eml_files)?;
+        send_messages(&settings, eml_files, false)?;
     }
 
     Ok(())
@@ -784,5 +783,47 @@ Message-ID:
     #[test]
     fn send_rset_test() {
         let _ = super::send_rset(&mut make_test_send_cmd("RSET"));
+    }
+
+    #[test]
+    fn check_json_value_test() {
+        let test_str = r#"{"test": "172.16.3.151"}"#;
+        let test_str_json: serde_json::Value = serde_json::from_str(test_str).unwrap();
+        assert!(super::check_json_value(&test_str_json, "test", serde_json::Value::is_string).is_ok());
+        assert!(super::check_json_value(&test_str_json, "test", serde_json::Value::is_number).is_err());
+
+        let test_str_res = super::check_json_value(&test_str_json, "test", serde_json::Value::is_boolean);
+        assert!(test_str_res.is_err());
+        assert_eq!("test: Invalid type: \"172.16.3.151\"", &test_str_res.err().unwrap().to_string());
+
+
+        let test_number = r#"{"test": 172}"#;
+        let test_number_json: serde_json::Value = serde_json::from_str(test_number).unwrap();
+        assert!(super::check_json_value(&test_number_json, "test", serde_json::Value::is_number).is_ok());
+        assert!(super::check_json_value(&test_number_json, "test", serde_json::Value::is_string).is_err());
+
+        let test_number_res = super::check_json_value(&test_number_json, "test", serde_json::Value::is_boolean);
+        assert!(test_number_res.is_err());
+        assert_eq!("test: Invalid type: 172", &test_number_res.err().unwrap().to_string());
+
+
+        let test_true = r#"{"test": true}"#;
+        let test_true_json: serde_json::Value = serde_json::from_str(test_true).unwrap();
+        assert!(super::check_json_value(&test_true_json, "test", serde_json::Value::is_boolean).is_ok());
+        assert!(super::check_json_value(&test_true_json, "test", serde_json::Value::is_string).is_err());
+
+        let test_true_res = super::check_json_value(&test_true_json, "test", serde_json::Value::is_number);
+        assert!(test_true_res.is_err());
+        assert_eq!("test: Invalid type: true", &test_true_res.err().unwrap().to_string());
+
+
+        let test_false = r#"{"test": false}"#;
+        let test_false_json: serde_json::Value = serde_json::from_str(test_false).unwrap();
+        assert!(super::check_json_value(&test_false_json, "test", serde_json::Value::is_boolean).is_ok());
+        assert!(super::check_json_value(&test_false_json, "test", serde_json::Value::is_string).is_err());
+
+        let test_false_res = super::check_json_value(&test_false_json, "test", serde_json::Value::is_number);
+        assert!(test_false_res.is_err());
+        assert_eq!("test: Invalid type: false", &test_false_res.err().unwrap().to_string());
     }
 }
