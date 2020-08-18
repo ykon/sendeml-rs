@@ -16,6 +16,7 @@ use chrono::prelude::*;
 use rand::{thread_rng, Rng};
 use rand::distributions::Alphanumeric;
 use rayon::prelude::*;
+use serde_json::Value;
 
 const CR: u8 = b'\r';
 const LF: u8 = b'\n';
@@ -179,30 +180,32 @@ fn new_error(msg: &str) -> SendEmlError {
     SendEmlError::StrError(msg.to_owned())
 }
 
-fn get_settings_from_text(text: &str) -> SendEmlResult<serde_json::Value> {
+fn get_settings_from_text(text: &str) -> SendEmlResult<Value> {
     serde_json::from_str(text).map_err(|e| SendEmlError::JsonError(e))
 }
 
-fn get_settings(json_file: &str) -> SendEmlResult<serde_json::Value> {
+fn get_settings(json_file: &str) -> SendEmlResult<Value> {
     get_settings_from_text(&fs::read_to_string(json_file)?)
 }
 
-fn check_json_value(json: &serde_json::Value, name: &str, check: for<'r> fn(&'r serde_json::Value) -> bool) -> SendEmlResult<()> {
+type ValuePred = for<'r> fn(&'r Value) -> bool;
+
+fn check_json_value(json: &Value, name: &str, pred: ValuePred) -> SendEmlResult<()> {
     match json.get(name) {
-        Some(v) if !check(v) => {
+        Some(v) if !pred(v) => {
             Err(new_error(&format!("{}: Invalid type: {}", name, v)))
         },
         _ => Ok(())
     }
 }
 
-fn check_json_array_value(json: &serde_json::Value, name: &str, check: for<'r> fn(&'r serde_json::Value) -> bool) -> SendEmlResult<()> {
+fn check_json_array_value(json: &Value, name: &str, pred: ValuePred) -> SendEmlResult<()> {
     match json.get(name) {
         Some(v) => {
             if !v.is_array() {
                 return Err(new_error(&format!("{}: Invalid type (array): {}", name, v)))
             }
-            if let Some(elm) = v.as_array().unwrap().iter().find(|v| !check(v)) {
+            if let Some(elm) = v.as_array().unwrap().iter().find(|v| !pred(v)) {
                 return Err(new_error(&format!("{}: Invalid type (element): {}", name, elm)))
             }
             Ok(())
@@ -211,23 +214,23 @@ fn check_json_array_value(json: &serde_json::Value, name: &str, check: for<'r> f
     }
 }
 
-fn check_settings(json: &serde_json::Value) -> SendEmlResult<()> {
+fn check_settings(json: &Value) -> SendEmlResult<()> {
     let names = ["smtpHost", "smtpPort", "fromAddress", "toAddress", "emlFile"];
     if let Some(key) = names.iter().find(|n| json.get(n).is_none()) {
         return Err(new_error(&format!("{} key does not exist", key)))
     }
 
-    check_json_value(json, "smtpHost", serde_json::Value::is_string)?;
-    check_json_value(json, "smtpPort", serde_json::Value::is_number)?;
-    check_json_value(json, "fromAddress", serde_json::Value::is_string)?;
-    check_json_array_value(json, "toAddress", serde_json::Value::is_string)?;
-    check_json_array_value(json, "emlFile", serde_json::Value::is_string)?;
-    check_json_value(json, "updateDate", serde_json::Value::is_boolean)?;
-    check_json_value(json, "updateMessageId", serde_json::Value::is_boolean)?;
-    check_json_value(json, "useParallel", serde_json::Value::is_boolean)
+    check_json_value(json, "smtpHost", Value::is_string)?;
+    check_json_value(json, "smtpPort", Value::is_number)?;
+    check_json_value(json, "fromAddress", Value::is_string)?;
+    check_json_array_value(json, "toAddress", Value::is_string)?;
+    check_json_array_value(json, "emlFile", Value::is_string)?;
+    check_json_value(json, "updateDate", Value::is_boolean)?;
+    check_json_value(json, "updateMessageId", Value::is_boolean)?;
+    check_json_value(json, "useParallel", Value::is_boolean)
 }
 
-fn map_settings(json: serde_json::Value) -> Settings {
+fn map_settings(json: Value) -> Settings {
     Settings {
         smtp_host: json["smtpHost"].as_str().unwrap().to_string(),
         smtp_port: json["smtpPort"].as_u64().unwrap() as u32,
@@ -785,45 +788,62 @@ Message-ID:
         let _ = super::send_rset(&mut make_test_send_cmd("RSET"));
     }
 
+    use serde_json::Value;
+
     #[test]
     fn check_json_value_test() {
-        let test_str = r#"{"test": "172.16.3.151"}"#;
-        let test_str_json: serde_json::Value = serde_json::from_str(test_str).unwrap();
-        assert!(super::check_json_value(&test_str_json, "test", serde_json::Value::is_string).is_ok());
-        assert!(super::check_json_value(&test_str_json, "test", serde_json::Value::is_number).is_err());
+        fn check(json: &str, pred: super::ValuePred) -> super::SendEmlResult<()> {
+            let v: Value = serde_json::from_str(json).unwrap();
+            super::check_json_value(&v, "test", pred)
+        }
 
-        let test_str_res = super::check_json_value(&test_str_json, "test", serde_json::Value::is_boolean);
-        assert!(test_str_res.is_err());
-        assert_eq!("test: Invalid type: \"172.16.3.151\"", &test_str_res.err().unwrap().to_string());
+        fn check_error(json: &str, pred: super::ValuePred, expected: &str) {
+            let res = check(&json, pred);
+            assert!(res.is_err());
+            assert_eq!(expected, &res.err().unwrap().to_string());
+        }
 
+        let json = r#"{"test": "172.16.3.151"}"#;
+        assert!(check(&json, Value::is_string).is_ok());
+        assert!(check(&json, Value::is_number).is_err());
+        check_error(&json, Value::is_boolean, "test: Invalid type: \"172.16.3.151\"");
 
-        let test_number = r#"{"test": 172}"#;
-        let test_number_json: serde_json::Value = serde_json::from_str(test_number).unwrap();
-        assert!(super::check_json_value(&test_number_json, "test", serde_json::Value::is_number).is_ok());
-        assert!(super::check_json_value(&test_number_json, "test", serde_json::Value::is_string).is_err());
+        let json = r#"{"test": 172}"#;
+        assert!(check(&json, Value::is_number).is_ok());
+        assert!(check(&json, Value::is_string).is_err());
+        check_error(&json, Value::is_boolean, "test: Invalid type: 172");
 
-        let test_number_res = super::check_json_value(&test_number_json, "test", serde_json::Value::is_boolean);
-        assert!(test_number_res.is_err());
-        assert_eq!("test: Invalid type: 172", &test_number_res.err().unwrap().to_string());
+        let json = r#"{"test": true}"#;
+        assert!(check(&json, Value::is_boolean).is_ok());
+        assert!(check(&json, Value::is_string).is_err());
+        check_error(&json, Value::is_number, "test: Invalid type: true");
 
+        let json = r#"{"test": false}"#;
+        assert!(check(&json, Value::is_boolean).is_ok());
+        assert!(check(&json, Value::is_string).is_err());
+        check_error(&json, Value::is_number, "test: Invalid type: false");
+    }
 
-        let test_true = r#"{"test": true}"#;
-        let test_true_json: serde_json::Value = serde_json::from_str(test_true).unwrap();
-        assert!(super::check_json_value(&test_true_json, "test", serde_json::Value::is_boolean).is_ok());
-        assert!(super::check_json_value(&test_true_json, "test", serde_json::Value::is_string).is_err());
+    #[test]
+    fn check_json_array_value_test() {
+        fn check(json: &str, pred: super::ValuePred) -> super::SendEmlResult<()> {
+            let v: Value = serde_json::from_str(json).unwrap();
+            super::check_json_array_value(&v, "test", pred)
+        }
 
-        let test_true_res = super::check_json_value(&test_true_json, "test", serde_json::Value::is_number);
-        assert!(test_true_res.is_err());
-        assert_eq!("test: Invalid type: true", &test_true_res.err().unwrap().to_string());
+        fn check_error(json: &str, pred: super::ValuePred, expected: &str) {
+            let res = check(&json, pred);
+            assert!(res.is_err());
+            assert_eq!(expected, &res.err().unwrap().to_string());
+        }
 
+        let json = r#"{"test": ["172.16.3.151", "172.16.3.152", "172.16.3.153"]}"#;
+        assert!(check(json, Value::is_string).is_ok());
 
-        let test_false = r#"{"test": false}"#;
-        let test_false_json: serde_json::Value = serde_json::from_str(test_false).unwrap();
-        assert!(super::check_json_value(&test_false_json, "test", serde_json::Value::is_boolean).is_ok());
-        assert!(super::check_json_value(&test_false_json, "test", serde_json::Value::is_string).is_err());
+        let json = r#"{"test": "172.16.3.151"}"#;
+        check_error(json, Value::is_string, "test: Invalid type (array): \"172.16.3.151\"");
 
-        let test_false_res = super::check_json_value(&test_false_json, "test", serde_json::Value::is_number);
-        assert!(test_false_res.is_err());
-        assert_eq!("test: Invalid type: false", &test_false_res.err().unwrap().to_string());
+        let json = r#"{"test": ["172.16.3.151", "172.16.3.152", 172]}"#;
+        check_error(json, Value::is_string, "test: Invalid type (element): 172");
     }
 }
