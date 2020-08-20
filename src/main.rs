@@ -21,7 +21,7 @@ use serde_json::Value;
 const CR: u8 = b'\r';
 const LF: u8 = b'\n';
 const CRLF: &str = "\r\n";
-const VERSION: f64 = 1.0;
+const VERSION: f64 = 1.1;
 
 fn make_now_date_line() -> String {
     format!("Date: {}{}", Local::now().format("%a, %d %b %Y %H:%M:%S %z"), CRLF)
