@@ -97,12 +97,12 @@ fn make_json_sample() -> String {
     "smtpHost": "172.16.3.151",
     "smtpPort": 25,
     "fromAddress": "a001@ah62.example.jp",
-    "toAddress": [
+    "toAddresses": [
         "a001@ah62.example.jp",
         "a002@ah62.example.jp",
         "a003@ah62.example.jp"
     ],
-    "emlFile": [
+    "emlFiles": [
         "test1.eml",
         "test2.eml",
         "test3.eml"
@@ -138,8 +138,8 @@ struct Settings {
     smtp_host: String,
     smtp_port: u32,
     from_address: String,
-    to_address: Vec<String>,
-    eml_file: Vec<String>,
+    to_addresses: Vec<String>,
+    eml_files: Vec<String>,
     update_date: bool,
     update_message_id: bool,
     use_parallel: bool
@@ -215,7 +215,7 @@ fn check_json_array_value(json: &Value, name: &str, pred: ValuePred) -> SendEmlR
 }
 
 fn check_settings(json: &Value) -> SendEmlResult<()> {
-    let names = ["smtpHost", "smtpPort", "fromAddress", "toAddress", "emlFile"];
+    let names = ["smtpHost", "smtpPort", "fromAddress", "toAddresses", "emlFiles"];
     if let Some(key) = names.iter().find(|n| json.get(n).is_none()) {
         return Err(new_error(&format!("{} key does not exist", key)))
     }
@@ -223,8 +223,8 @@ fn check_settings(json: &Value) -> SendEmlResult<()> {
     check_json_value(json, "smtpHost", Value::is_string)?;
     check_json_value(json, "smtpPort", Value::is_number)?;
     check_json_value(json, "fromAddress", Value::is_string)?;
-    check_json_array_value(json, "toAddress", Value::is_string)?;
-    check_json_array_value(json, "emlFile", Value::is_string)?;
+    check_json_array_value(json, "toAddresses", Value::is_string)?;
+    check_json_array_value(json, "emlFiles", Value::is_string)?;
     check_json_value(json, "updateDate", Value::is_boolean)?;
     check_json_value(json, "updateMessageId", Value::is_boolean)?;
     check_json_value(json, "useParallel", Value::is_boolean)
@@ -235,8 +235,8 @@ fn map_settings(json: Value) -> Settings {
         smtp_host: json["smtpHost"].as_str().unwrap().to_string(),
         smtp_port: json["smtpPort"].as_u64().unwrap() as u32,
         from_address: json["fromAddress"].as_str().unwrap().to_string(),
-        to_address: json["toAddress"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect(),
-        eml_file: json["emlFile"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect(),
+        to_addresses: json["toAddresses"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect(),
+        eml_files: json["emlFiles"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect(),
         update_date: json.get("updateDate").map(|v| v.as_bool().unwrap()).unwrap_or(true),
         update_message_id: json.get("updateMessageId").map(|v| v.as_bool().unwrap()).unwrap_or(true),
         use_parallel: json.get("useParallel").map(|v| v.as_bool().unwrap()).unwrap_or(false)
@@ -368,7 +368,7 @@ fn send_messages(settings: &Settings, eml_files: &Vec<String>, use_parallel: boo
         }
 
         send_from(&mut send, &settings.from_address)?;
-        send_rcpt_to(&mut send, &settings.to_address)?;
+        send_rcpt_to(&mut send, &settings.to_addresses)?;
         send_data(&mut send)?;
 
         send_mail(&mut stream, &file, settings.update_date, settings.update_message_id, use_parallel)
@@ -390,9 +390,9 @@ fn proc_json(json_file: &str) -> SendEmlResult<()> {
     let json = get_settings(json_file)?;
     check_settings(&json)?;
     let settings = map_settings(json);
-    let eml_files = &settings.eml_file;
+    let eml_files = &settings.eml_files;
 
-    if settings.use_parallel && settings.eml_file.len() > 1 {
+    if settings.use_parallel && settings.eml_files.len() > 1 {
         eml_files.par_iter().for_each(|file| {
             if let Err(e) = send_messages(&settings, &vec![file.to_string()], true) {
                 println!("error: {}: {}", json_file, e);
@@ -708,11 +708,11 @@ Message-ID:
         assert_eq!("a001@ah62.example.jp", settings.from_address);
 
         let to_addr1: Vec<String> = vec!["a001@ah62.example.jp", "a002@ah62.example.jp", "a003@ah62.example.jp"].iter().map(|s| s.to_string()).collect();
-        let to_addr2: Vec<String> = settings.to_address;
+        let to_addr2: Vec<String> = settings.to_addresses;
         assert_eq!(to_addr1, to_addr2);
 
         let eml_file1: Vec<String> = vec!["test1.eml", "test2.eml", "test3.eml"].iter().map(|s| s.to_string()).collect();
-        let eml_file2: Vec<String> = settings.eml_file;
+        let eml_file2: Vec<String> = settings.eml_files;
         assert_eq!(eml_file1, eml_file2);
 
         assert_eq!(true, settings.update_date);
@@ -732,8 +732,8 @@ Message-ID:
         assert!(check_no_key("smtpHost").is_err());
         assert!(check_no_key("smtpPort").is_err());
         assert!(check_no_key("fromAddress").is_err());
-        assert!(check_no_key("toAddress").is_err());
-        assert!(check_no_key("emlFile").is_err());
+        assert!(check_no_key("toAddresses").is_err());
+        assert!(check_no_key("emlFiles").is_err());
         assert!(check_no_key("updateDate").is_ok());
         assert!(check_no_key("updateMessageId").is_ok());
         assert!(check_no_key("useParallel").is_ok());
