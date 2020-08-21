@@ -78,17 +78,20 @@ fn replace_header(header: &[u8], update_date: bool, update_message_id: bool) -> 
     }
 }
 
-fn replace_mail(file_buf: &[u8], update_date: bool, update_message_id: bool) -> SendEmlResult<Vec<u8>> {
+fn replace_mail(file_buf: &[u8], update_date: bool, update_message_id: bool) -> Vec<u8> {
     if is_not_update(update_date, update_message_id) {
-        return Ok(file_buf.to_owned())
+        return file_buf.to_owned()
     }
 
     match split_mail(&file_buf) {
         Some((header, body)) => {
             let repl_header = replace_header(&header, update_date, update_message_id);
-            Ok(combine_mail(&repl_header, &body))
+            combine_mail(&repl_header, &body)
         },
-        None => Err(new_error("Invalid mail"))
+        None => {
+            println!("error: Invalid mail: Disable updateDate, updateMessageId");
+            file_buf.to_owned()
+        }
     }
 }
 
@@ -296,7 +299,7 @@ fn recv_line(reader: &mut TcpReader, use_parallel: bool) -> CmdResult {
 fn send_mail(stream: &mut TcpStream, file: &str, update_date: bool, update_message_id: bool, use_parallel: bool) -> CmdResult {
     println!("{}send: {}", make_id_prefix(use_parallel), file);
 
-    let buf = replace_mail(&fs::read(file)?, update_date, update_message_id)?;
+    let buf = replace_mail(&fs::read(file)?, update_date, update_message_id);
     stream.write_all(&buf)?;
     stream.flush()?;
 
@@ -657,13 +660,13 @@ Message-ID:
     #[test]
     fn replace_mail_test() {
         let mail = make_simple_mail();
-        let repl_mail = super::replace_mail(&mail, false, false).unwrap();
+        let repl_mail = super::replace_mail(&mail, false, false);
         assert_eq!(mail, repl_mail);
 
         let invalid_mail = make_invalid_mail();
-        assert!(super::replace_mail(&invalid_mail, true, true).is_err());
+        assert_eq!(invalid_mail, super::replace_mail(&invalid_mail, true, true));
 
-        let repl_mail = super::replace_mail(&mail, true, true).unwrap();
+        let repl_mail = super::replace_mail(&mail, true, true);
         assert_ne!(mail, repl_mail);
 
         let mail_last100 = mail[(mail.len() - 100)..mail.len()].to_vec();
