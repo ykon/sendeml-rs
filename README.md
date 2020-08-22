@@ -1,5 +1,5 @@
-## About
-### SendEML is a testing tool for sending raw eml files.
+## SendEML
+A testing tool for sending raw eml files.
 * SendEML-rs runs on Windows, Linux and Other Platforms.
 
 ## Building
@@ -13,7 +13,7 @@ cargo build --release
 sendeml-rs <setting_file> ...
 ```
 
-## Setting File (sample)
+## Setting File (JSON format)
 ```
 {
     "smtpHost": "172.16.3.151",
