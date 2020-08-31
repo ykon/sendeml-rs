@@ -36,23 +36,23 @@ fn make_random_message_id_line() -> String {
     format!("Message-ID: <{}>{}", rand_str, CRLF)
 }
 
-fn replace_message_id_line(file_buf: &[u8]) -> std::borrow::Cow<[u8]> {
+fn replace_message_id_line(bytes: &[u8]) -> std::borrow::Cow<[u8]> {
     let re = regex::bytes::Regex::new(r"Message-ID:[\s\S]+?\r\n([^ \t]|$)").unwrap();
-    re.replace(file_buf, format!("{}$1", make_random_message_id_line()).as_bytes())
+    re.replace(bytes, format!("{}$1", make_random_message_id_line()).as_bytes())
 }
 
-fn replace_date_line(file_buf: &[u8]) -> std::borrow::Cow<[u8]> {
+fn replace_date_line(bytes: &[u8]) -> std::borrow::Cow<[u8]> {
     let re = regex::bytes::Regex::new(r"Date:[\s\S]+?\r\n([^ \t]|$)").unwrap();
-    re.replace(&file_buf, format!("{}$1", make_now_date_line()).as_bytes())
+    re.replace(&bytes, format!("{}$1", make_now_date_line()).as_bytes())
 }
 
 fn is_not_update(update_date: bool, update_message_id: bool) -> bool {
     !update_date && !update_message_id
 }
 
-fn find_empty_line(file_buf: &[u8]) -> Option<usize> {
+fn find_empty_line(bytes: &[u8]) -> Option<usize> {
     let re = regex::bytes::Regex::new(r"\r\n\r\n").unwrap();
-    re.find(&file_buf).map(|m| m.start())
+    re.find(&bytes).map(|m| m.start())
 }
 
 const EMPTY_LINE: [u8; 4] = [CR, LF, CR, LF];
@@ -61,10 +61,10 @@ fn combine_mail(header: &[u8], body: &[u8]) -> Vec<u8> {
     [header, &EMPTY_LINE, body].concat()
 }
 
-fn split_mail(file_buf: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-    find_empty_line(file_buf).map(|idx| {
-        let header = file_buf[0..idx].to_vec();
-        let body = file_buf[(idx + EMPTY_LINE.len())..file_buf.len()].to_vec();
+fn split_mail(bytes: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    find_empty_line(bytes).map(|idx| {
+        let header = bytes[0..idx].to_vec();
+        let body = bytes[(idx + EMPTY_LINE.len())..bytes.len()].to_vec();
         (header, body)
     })
 }
@@ -78,20 +78,13 @@ fn replace_header(header: &[u8], update_date: bool, update_message_id: bool) -> 
     }
 }
 
-fn replace_mail(file_buf: &[u8], update_date: bool, update_message_id: bool) -> Vec<u8> {
+fn replace_mail(bytes: &[u8], update_date: bool, update_message_id: bool) -> Option<Vec<u8>> {
     if is_not_update(update_date, update_message_id) {
-        return file_buf.to_owned()
+        Some(bytes.to_owned())
     }
-
-    match split_mail(&file_buf) {
-        Some((header, body)) => {
-            let repl_header = replace_header(&header, update_date, update_message_id);
-            combine_mail(&repl_header, &body)
-        },
-        None => {
-            println!("error: Invalid mail: Disable updateDate, updateMessageId");
-            file_buf.to_owned()
-        }
+    else {
+        split_mail(&bytes).map(|(header, body)|
+            combine_mail(&replace_header(&header, update_date, update_message_id), &body))
     }
 }
 
@@ -299,8 +292,13 @@ fn recv_line(reader: &mut TcpReader, use_parallel: bool) -> CmdResult {
 fn send_mail(stream: &mut TcpStream, file: &str, update_date: bool, update_message_id: bool, use_parallel: bool) -> CmdResult {
     println!("{}send: {}", make_id_prefix(use_parallel), file);
 
-    let buf = replace_mail(&fs::read(file)?, update_date, update_message_id);
-    stream.write_all(&buf)?;
+    let mail = fs::read(file)?;
+    let repl_mail = replace_mail(&mail, update_date, update_message_id);
+    if repl_mail.is_none() {
+        println!("error: Invalid mail: Disable updateDate, updateMessageId");
+    }
+
+    stream.write_all(&repl_mail.unwrap_or(mail))?;
     stream.flush()?;
 
     Ok("".to_string())
@@ -373,10 +371,7 @@ fn send_messages(settings: &Settings, eml_files: &Vec<String>, use_parallel: boo
         send_from(&mut send, &settings.from_address)?;
         send_rcpt_to(&mut send, &settings.to_addresses)?;
         send_data(&mut send)?;
-
-        send_mail(&mut stream, &file, settings.update_date, settings.update_message_id, use_parallel)
-            .map_err(|e| new_error(&format!("{}: {}", file, e)))?;
-
+        send_mail(&mut stream, &file, settings.update_date, settings.update_message_id, use_parallel)?;
         send_crlf_dot(&mut send)?;
         reset = true;
     }
@@ -661,12 +656,12 @@ Message-ID:
     fn replace_mail_test() {
         let mail = make_simple_mail();
         let repl_mail = super::replace_mail(&mail, false, false);
-        assert_eq!(mail, repl_mail);
+        assert_eq!(mail, repl_mail.unwrap());
 
         let invalid_mail = make_invalid_mail();
-        assert_eq!(invalid_mail, super::replace_mail(&invalid_mail, true, true));
+        assert!(super::replace_mail(&invalid_mail, true, true).is_none());
 
-        let repl_mail = super::replace_mail(&mail, true, true);
+        let repl_mail = super::replace_mail(&mail, true, true).unwrap();
         assert_ne!(mail, repl_mail);
 
         let mail_last100 = mail[(mail.len() - 100)..mail.len()].to_vec();
