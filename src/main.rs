@@ -23,7 +23,7 @@ const LF: u8 = b'\n';
 const SPACE: u8 = b' ';
 const HTAB: u8 = b'\t';
 const CRLF: &str = "\r\n";
-const VERSION: f64 = 1.1;
+const VERSION: f64 = 1.2;
 
 const DATE_BYTES: &[u8] = "Date:".as_bytes();
 const MESSAGE_ID_BYTES: &[u8] = "Message-ID:".as_bytes();
