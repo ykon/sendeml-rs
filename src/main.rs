@@ -20,8 +20,13 @@ use serde_json::Value;
 
 const CR: u8 = b'\r';
 const LF: u8 = b'\n';
+const SPACE: u8 = b' ';
+const HTAB: u8 = b'\t';
 const CRLF: &str = "\r\n";
 const VERSION: f64 = 1.1;
+
+const DATE_BYTES: &[u8] = "Date:".as_bytes();
+const MESSAGE_ID_BYTES: &[u8] = "Message-ID:".as_bytes();
 
 fn make_now_date_line() -> String {
     format!("Date: {}{}", Local::now().format("%a, %d %b %Y %H:%M:%S %z"), CRLF)
@@ -36,23 +41,39 @@ fn make_random_message_id_line() -> String {
     format!("Message-ID: <{}>{}", rand_str, CRLF)
 }
 
-fn replace_message_id_line(bytes: &[u8]) -> std::borrow::Cow<[u8]> {
-    let re = regex::bytes::Regex::new(r"Message-ID:[\s\S]+?\r\n([^ \t]|$)").unwrap();
-    re.replace(bytes, format!("{}$1", make_random_message_id_line()).as_bytes())
-}
-
-fn replace_date_line(bytes: &[u8]) -> std::borrow::Cow<[u8]> {
-    let re = regex::bytes::Regex::new(r"Date:[\s\S]+?\r\n([^ \t]|$)").unwrap();
-    re.replace(&bytes, format!("{}$1", make_now_date_line()).as_bytes())
-}
-
 fn is_not_update(update_date: bool, update_message_id: bool) -> bool {
     !update_date && !update_message_id
 }
 
+fn find_index(bytes: &[u8], value: u8, offset: usize) -> Option<usize> {
+    bytes[offset..].iter().position(|&b| b == value).map(|i| i + offset)
+}
+
+fn find_lf(bytes: &[u8], offset: usize) -> Option<usize> {
+    find_index(bytes, LF, offset)
+}
+
+fn find_cr(bytes: &[u8], offset: usize) -> Option<usize> {
+    find_index(bytes, CR, offset)
+}
+
+fn has_next_lf_cr_lf(bytes: &[u8], idx: usize) -> bool {
+    if bytes.len() < (idx + 4) {
+        false
+    } else {
+        bytes[(idx + 1)..(idx + 4)] == [LF, CR, LF]
+    }
+}
+
 fn find_empty_line(bytes: &[u8]) -> Option<usize> {
-    let re = regex::bytes::Regex::new(r"\r\n\r\n").unwrap();
-    re.find(&bytes).map(|m| m.start())
+    let mut offset = 0 as usize;
+    loop {
+        match find_cr(bytes, offset) {
+            None => return None,
+            Some(idx) if has_next_lf_cr_lf(bytes, idx) => return Some(idx),
+            Some(idx) => offset = idx + 1
+        }
+    }
 }
 
 const EMPTY_LINE: [u8; 4] = [CR, LF, CR, LF];
@@ -63,26 +84,110 @@ fn combine_mail(header: &[u8], body: &[u8]) -> Vec<u8> {
 
 fn split_mail(bytes: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     find_empty_line(bytes).map(|idx| {
-        let header = bytes[0..idx].to_vec();
+        let header = bytes[..idx].to_vec();
         let body = bytes[(idx + EMPTY_LINE.len())..bytes.len()].to_vec();
         (header, body)
     })
 }
 
-fn replace_header(header: &[u8], update_date: bool, update_message_id: bool) -> Vec<u8> {
-    match (update_date, update_message_id) {
-        (true, true) => replace_message_id_line(&replace_date_line(&header)).into_owned(),
-        (true, false) => replace_date_line(header).into_owned(),
-        (false, true) => replace_message_id_line(&header).into_owned(),
-        (false, false) => header.to_owned()
+fn find_all_lf(bytes: &[u8]) -> Vec<usize> {
+    let mut indices = Vec::new();
+    let mut offset = 0 as usize;
+    loop {
+        match find_lf(bytes, offset) {
+            None => return indices,
+            Some(idx) => {
+                indices.push(idx);
+                offset = idx + 1;
+            }
+        };
     }
+}
+
+fn get_lines(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut offset = 0 as usize;
+    let mut indices = find_all_lf(bytes);
+    indices.push(bytes.len() - 1);
+
+    indices.iter().map(|i| {
+        let line = bytes[offset..(i + 1)].to_vec();
+        offset = i + 1;
+        line
+    }).collect()
+}
+
+fn is_wsp(b: u8) -> bool {
+    b == SPACE || b == HTAB
+}
+
+fn is_first_wsp(bytes: &[u8]) -> bool {
+    is_wsp(*bytes.first().unwrap_or(&b'\0'))
+}
+
+fn match_header(line: &[u8], header: &[u8]) -> bool {
+    if header.len() == 0 {
+        panic!("header is empty")
+    }
+
+    if line.len() < header.len() {
+        false
+    } else {
+        &line[..header.len()] == header
+    }
+}
+
+fn is_date_line(line: &[u8]) -> bool {
+    match_header(line, DATE_BYTES)
+}
+
+fn is_message_id_line(line: &[u8]) -> bool {
+    match_header(line, MESSAGE_ID_BYTES)
+}
+
+fn replace_line<F1, F2>(lines: &Vec<Vec<u8>>, match_line: F1, make_line: F2) -> Vec<Vec<u8>>
+where
+    F1: Fn(&[u8]) -> bool,
+    F2: Fn() -> String
+{
+    match lines.iter().position(|l| match_line(l)) {
+        None => lines.to_vec(),
+        Some(idx) => {
+            let p1 = lines.iter().take(idx);
+            let p2 = [make_line().into_bytes()];
+            let p3 = lines.iter().skip(idx + 1).skip_while(|l| is_first_wsp(l));
+
+            p1.chain(p2.iter()).chain(p3).cloned().collect()
+        }
+    }
+}
+
+fn replace_date_line(lines: &Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    replace_line(lines, is_date_line, make_now_date_line)
+}
+
+fn replace_message_id_line(lines: &Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    replace_line(lines, is_message_id_line, make_random_message_id_line)
+}
+
+fn concat_bytes(bytes_list: &Vec<Vec<u8>>) -> Vec<u8> {
+    bytes_list.iter().flatten().cloned().collect()
+}
+
+fn replace_header(header: &[u8], update_date: bool, update_message_id: bool) -> Vec<u8> {
+    let lines = get_lines(header);
+    let new_lines = match (update_date, update_message_id) {
+        (true, true) => replace_message_id_line(&replace_date_line(&lines)),
+        (true, false) => replace_date_line(&lines),
+        (false, true) => replace_message_id_line(&lines),
+        (false, false) => lines
+    };
+    concat_bytes(&new_lines)
 }
 
 fn replace_mail(bytes: &[u8], update_date: bool, update_message_id: bool) -> Option<Vec<u8>> {
     if is_not_update(update_date, update_message_id) {
         Some(bytes.to_owned())
-    }
-    else {
+    } else {
         split_mail(&bytes).map(|(header, body)|
             combine_mail(&replace_header(&header, update_date, update_message_id), &body))
     }
@@ -188,23 +293,20 @@ type ValuePred = for<'r> fn(&'r Value) -> bool;
 
 fn check_json_value(json: &Value, name: &str, pred: ValuePred) -> SendEmlResult<()> {
     match json.get(name) {
-        Some(v) if !pred(v) => {
-            Err(new_error(&format!("{}: Invalid type: {}", name, v)))
-        },
+        Some(v) if !pred(v) => Err(new_error(&format!("{}: Invalid type: {}", name, v))),
         _ => Ok(())
     }
 }
 
 fn check_json_array_value(json: &Value, name: &str, pred: ValuePred) -> SendEmlResult<()> {
     match json.get(name) {
+        Some(v) if !v.is_array() => Err(new_error(&format!("{}: Invalid type (array): {}", name, v))),
         Some(v) => {
-            if !v.is_array() {
-                return Err(new_error(&format!("{}: Invalid type (array): {}", name, v)))
-            }
             if let Some(elm) = v.as_array().unwrap().iter().find(|v| !pred(v)) {
-                return Err(new_error(&format!("{}: Invalid type (element): {}", name, elm)))
+                Err(new_error(&format!("{}: Invalid type (element): {}", name, elm)))
+            } else {
+                Ok(())
             }
-            Ok(())
         },
         _ => Ok(())
     }
@@ -474,7 +576,7 @@ Content-Transfer-Encoding: 7bit
 Content-Language: en-US
 
 test"#;
-        mail.replace("\n", "\r\n").as_bytes().to_vec()
+        mail.replace("\n", "\r\n").into_bytes()
     }
 
     fn make_folded_end_date() -> Vec<u8> {
@@ -493,7 +595,7 @@ Date:
  Sun, 26 Jul 2020
  22:01:37 +0900
 "#;
-        mail.replace("\n", "\r\n").as_bytes().to_vec()
+        mail.replace("\n", "\r\n").into_bytes()
     }
 
     fn make_folded_end_message_id() -> Vec<u8> {
@@ -512,30 +614,66 @@ Date:
 Message-ID:
  <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>
 "#;
-        mail.replace("\n", "\r\n").as_bytes().to_vec()
+        mail.replace("\n", "\r\n").into_bytes()
+    }
+
+    fn make_fake_date() -> Vec<u8> {
+        let mail = r#"From: a001 <a001@ah62.example.jp>
+Subject: test
+To: a002@ah62.example.jp
+Message-ID: <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>
+Test: Date: Fake, 26 Jul 2020 22:01:37 +0900
+Date: Sun, 26 Jul 2020 22:01:37 +0900
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:78.0) Gecko/20100101
+ Thunderbird/78.0.1
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8; format=flowed
+Content-Transfer-Encoding: 7bit
+Content-Language: en-US
+
+test"#;
+        mail.replace("\n", "\r\n").into_bytes()
+    }
+
+    fn make_fake_message_id() -> Vec<u8> {
+        let mail = r#"From: a001 <a001@ah62.example.jp>
+Subject: test
+To: a002@ah62.example.jp
+Test: Message-ID: <fake-4f70-761a-e103-70119d1bcb32@ah62.example.jp>
+Message-ID: <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>
+Date: Sun, 26 Jul 2020 22:01:37 +0900
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:78.0) Gecko/20100101
+ Thunderbird/78.0.1
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8; format=flowed
+Content-Transfer-Encoding: 7bit
+Content-Language: en-US
+
+test"#;
+        mail.replace("\n", "\r\n").into_bytes()
     }
 
     fn make_simple_mail() -> Vec<u8> {
-        make_simple_mail_text().as_bytes().to_vec()
+        make_simple_mail_text().into_bytes()
     }
 
     fn make_invalid_mail() -> Vec<u8> {
-        make_simple_mail_text().replace("\r\n\r\n", "").as_bytes().to_vec()
+        make_simple_mail_text().replace("\r\n\r\n", "").into_bytes()
     }
 
     fn get_header_line(header: &[u8], name: &str) -> Option<String> {
         let header_str = std::str::from_utf8(header).unwrap();
-        let re = regex::Regex::new(&format!(r"({}:[\s\S]+?\r\n)([^ \t]|$)", name)).unwrap();
+        let re = regex::Regex::new(&format!(r"(^|\n)({}:[\s\S]+?\r\n)([^ \t]|$)", name)).unwrap();
         let caps = re.captures(header_str).unwrap();
-        caps.get(1).map(|c| c.as_str().to_string())
-    }
-
-    fn get_message_id_line(header: &[u8]) -> Option<String> {
-        return get_header_line(header, "Message-ID")
+        caps.get(2).map(|c| c.as_str().to_string())
     }
 
     fn get_date_line(header: &[u8]) -> Option<String> {
         return get_header_line(header, "Date")
+    }
+
+    fn get_message_id_line(header: &[u8]) -> Option<String> {
+        return get_header_line(header, "Message-ID")
     }
 
     #[test]
@@ -553,32 +691,174 @@ Message-ID:
 
         let e_message_id = make_folded_end_message_id();
         assert_eq!("Message-ID:\r\n <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_message_id_line(&e_message_id).unwrap());
+
+        let fake_date = make_fake_date();
+        assert_eq!("Date: Sun, 26 Jul 2020 22:01:37 +0900\r\n", get_date_line(&fake_date).unwrap());
+
+        let fake_message_id = make_fake_message_id();
+        assert_eq!("Message-ID: <b0e564a5-4f70-761a-e103-70119d1bcb32@ah62.example.jp>\r\n", get_message_id_line(&fake_message_id).unwrap());
     }
 
     #[test]
-    fn replace_message_id_line_test() {
-        let (header, _) = super::split_mail(&make_simple_mail()).unwrap();
-        let repl_header = super::replace_message_id_line(&header);
+    fn find_cr_test() {
+        let mail = make_simple_mail();
+        assert_eq!(33, super::find_cr(&mail, 0).unwrap());
+        assert_eq!(48, super::find_cr(&mail, 34).unwrap());
+        assert_eq!(74, super::find_cr(&mail, 58).unwrap());
+    }
 
-        let orig_line = get_message_id_line(&header).unwrap();
-        let repl_line = get_message_id_line(&repl_header).unwrap();
-        assert_ne!(orig_line, repl_line);
+    #[test]
+    fn find_lf_test() {
+        let mail = make_simple_mail();
+        assert_eq!(34, super::find_lf(&mail, 0).unwrap());
+        assert_eq!(49, super::find_lf(&mail, 35).unwrap());
+        assert_eq!(75, super::find_lf(&mail, 59).unwrap());
+    }
 
-        let date_line = get_header_line(&repl_header, "Date");
-        assert!(date_line.is_some());
+    #[test]
+    fn find_all_lf_test() {
+        let mail = make_simple_mail();
+        let indices = super::find_all_lf(&mail);
+
+        assert_eq!(34, indices[0]);
+        assert_eq!(49, indices[1]);
+        assert_eq!(75, indices[2]);
+
+        assert_eq!(390, indices[indices.len() - 3]);
+        assert_eq!(415, indices[indices.len() - 2]);
+        assert_eq!(417, indices[indices.len() - 1]);
+    }
+
+    #[test]
+    fn get_lines_test() {
+        let mail = make_simple_mail();
+        let lines = super::get_lines(&mail);
+
+        assert_eq!(13, lines.len());
+
+        let test = |n: usize, line: &str| {
+            assert_eq!(line, std::str::from_utf8(&lines[n]).unwrap());
+        };
+
+        test(0, "From: a001 <a001@ah62.example.jp>\r\n");
+        test(1, "Subject: test\r\n");
+        test(2, "To: a002@ah62.example.jp\r\n");
+
+        test(lines.len() - 3, "Content-Language: en-US\r\n");
+        test(lines.len() - 2, "\r\n");
+        test(lines.len() - 1, "test");
+    }
+
+    #[test]
+    fn is_wsp_test() {
+        assert_eq!(true, super::is_wsp(b' '));
+        assert_eq!(true, super::is_wsp(b'\t'));
+        assert_eq!(false, super::is_wsp(b'\0'));
+        assert_eq!(false, super::is_wsp(b'a'));
+        assert_eq!(false, super::is_wsp(b'b'));
+    }
+
+    #[test]
+    fn is_first_wsp_test() {
+        assert_eq!(true, super::is_first_wsp(&[b' ', b'a', b'b']));
+        assert_eq!(true, super::is_first_wsp(&[b'\t', b'a', b'b']));
+        assert_eq!(false, super::is_first_wsp(&[b'\0', b'a', b'b']));
+        assert_eq!(false, super::is_first_wsp(&[b'a', b'b', b' ']));
+        assert_eq!(false, super::is_first_wsp(&[b'a', b'b', b'\t']));
+    }
+
+    #[test]
+    fn match_header_test() {
+        let test = |s1: &str, s2: &str| {
+            super::match_header(s1.as_bytes(), s2.as_bytes())
+        };
+
+        assert_eq!(true, test("Test:", "Test:"));
+        assert_eq!(true, test("Test:   ", "Test:"));
+        assert_eq!(true, test("Test: xxx", "Test:"));
+
+        assert_eq!(false, test("", "Test:"));
+        assert_eq!(false, test("T", "Test:"));
+        assert_eq!(false, test("Test", "Test:"));
+        assert_eq!(false, test("Xest:", "Test:"));
+    }
+
+    #[test]
+    #[should_panic]
+    fn match_header_test_panic() {
+        let test = |s1: &str, s2: &str| {
+            super::match_header(s1.as_bytes(), s2.as_bytes())
+        };
+
+        test("Test: xxx", "");
+    }
+
+    #[test]
+    fn is_date_line_test() {
+        let test = |s: &str| super::is_date_line(s.as_bytes());
+
+        assert_eq!(true, test("Date: xxx"));
+        assert_eq!(true, test("Date:xxx"));
+        assert_eq!(true, test("Date:"));
+        assert_eq!(true, test("Date:   "));
+
+        assert_eq!(false, test(""));
+        assert_eq!(false, test("Date"));
+        assert_eq!(false, test("xxx: Date"));
+        assert_eq!(false, test("X-Date: xxx"));
+    }
+
+    #[test]
+    fn is_message_id_line_test() {
+        let test = |s: &str| super::is_message_id_line(s.as_bytes());
+
+        assert_eq!(true, test("Message-ID: xxx"));
+        assert_eq!(true, test("Message-ID:xxx"));
+        assert_eq!(true, test("Message-ID:"));
+        assert_eq!(true, test("Message-ID:   "));
+
+        assert_eq!(false, test(""));
+        assert_eq!(false, test("Message-ID"));
+        assert_eq!(false, test("xxx: Message-ID"));
+        assert_eq!(false, test("X-Message-ID: xxx"));
     }
 
     #[test]
     fn replace_date_line_test() {
-        let (header, _) = super::split_mail(&make_simple_mail()).unwrap();
-        let repl_header = super::replace_date_line(&header);
+        let test = |mail: Vec<u8>| {
+            let lines = super::get_lines(&mail);
+            let new_lines = super::replace_date_line(&lines);
+            assert_ne!(lines, new_lines);
 
-        let orig_line = get_date_line(&header).unwrap();
-        let repl_line = get_date_line(&repl_header).unwrap();
-        assert_ne!(orig_line, repl_line);
+            let new_mail = super::concat_bytes(&new_lines);
+            assert_ne!(mail, new_mail);
 
-        let user_agent_line = get_header_line(&repl_header, "User-Agent");
-        assert!(user_agent_line.is_some());
+            assert_ne!(get_date_line(&mail), get_date_line(&new_mail));
+            assert_eq!(get_message_id_line(&mail), get_message_id_line(&new_mail));
+        };
+
+        test(make_simple_mail());
+        test(make_folded_mail());
+        test(make_fake_date());
+    }
+
+    #[test]
+    fn replace_message_id_line_test() {
+        let test = |mail: Vec<u8>| {
+            let lines = super::get_lines(&mail);
+            let new_lines = super::replace_message_id_line(&lines);
+            assert_ne!(lines, new_lines);
+
+            let new_mail = super::concat_bytes(&new_lines);
+            assert_ne!(mail, new_mail);
+
+            assert_ne!(get_message_id_line(&mail), get_message_id_line(&new_mail));
+            assert_eq!(get_date_line(&mail), get_date_line(&new_mail));
+        };
+
+        test(make_simple_mail());
+        test(make_folded_mail());
+        test(make_fake_date());
     }
 
     #[test]
@@ -595,6 +875,21 @@ Message-ID:
         let (header, body) = super::split_mail(&mail).unwrap();
         let new_mail = super::combine_mail(&header, &body);
         assert_eq!(mail, new_mail);
+    }
+
+    use super::CR;
+    use super::LF;
+
+    #[test]
+    fn has_next_lf_cr_lf_test() {
+        let test = |bytes: &[u8], idx: usize| super::has_next_lf_cr_lf(bytes, idx);
+
+        assert_eq!(true, test(&[CR, LF, CR, LF], 0));
+        assert_eq!(true, test(&[b'\0', CR, LF, CR, LF], 1));
+
+        assert_eq!(false, test(&[CR, LF, CR, LF], 1));
+        assert_eq!(false, test(&[CR, LF, CR, b'\0'], 0));
+        assert_eq!(false, test(&[CR, LF, CR, LF, b'\0'], 1));
     }
 
     #[test]
@@ -622,34 +917,43 @@ Message-ID:
 
     #[test]
     fn replace_header_test() {
-        let (header, _) = super::split_mail(&make_simple_mail()).unwrap();
-        let date_line = get_date_line(&header).unwrap();
-        let mid_line = get_message_id_line(&header).unwrap();
+        let mail = make_simple_mail();
+        let date_line = get_date_line(&mail).unwrap();
+        let mid_line = get_message_id_line(&mail).unwrap();
 
-        let repl_header = super::replace_header(&header, false, false);
-        assert_eq!(header, repl_header);
+        let repl_header = super::replace_header(&mail, false, false);
+        assert_eq!(mail, repl_header);
 
         let replace = |header: &Vec<u8>, update_date: bool, update_message_id: bool| -> (String, String) {
             let r_header = super::replace_header(header, update_date, update_message_id);
             (get_date_line(&r_header).unwrap(), get_message_id_line(&r_header).unwrap())
         };
 
-        let (r_date_line, r_mid_line) = replace(&header, true, true);
+        let (r_date_line, r_mid_line) = replace(&mail, true, true);
         assert_ne!(date_line, r_date_line);
         assert_ne!(mid_line, r_mid_line);
 
-        let (r_date_line, r_mid_line) = replace(&header, true, false);
+        let (r_date_line, r_mid_line) = replace(&mail, true, false);
         assert_ne!(date_line, r_date_line);
         assert_eq!(mid_line, r_mid_line);
 
-        let (r_date_line, r_mid_line) = replace(&header, false, true);
+        let (r_date_line, r_mid_line) = replace(&mail, false, true);
         assert_eq!(date_line, r_date_line);
         assert_ne!(mid_line, r_mid_line);
 
-        let (folded_header, _) = super::split_mail(&make_folded_mail()).unwrap();
-        let (f_date_line, f_mid_line) = replace(&folded_header, true, true);
+        let f_mail = &make_folded_mail();
+        let (f_date_line, f_mid_line) = replace(&f_mail, true, true);
         assert_eq!(1, f_date_line.chars().filter(|&c| c == '\n').count());
         assert_eq!(1, f_mid_line.chars().filter(|&c| c == '\n').count());
+    }
+
+    #[test]
+    fn concat_bytes_test() {
+        let mail = make_simple_mail();
+        let lines = super::get_lines(&mail);
+
+        let new_mail = super::concat_bytes(&lines);
+        assert_eq!(mail, new_mail);
     }
 
     #[test]
@@ -697,7 +1001,7 @@ Message-ID:
     }
 
     #[test]
-    fn get_and_map_settings() {
+    fn get_and_map_settings_test() {
         let json = super::make_json_sample();
         let settings = super::map_settings(super::get_settings_from_text(&json).unwrap());
 
