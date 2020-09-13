@@ -104,7 +104,9 @@ fn find_all_lf(bytes: &[u8]) -> Vec<usize> {
     }
 }
 
-fn get_lines(bytes: &[u8]) -> Vec<Vec<u8>> {
+type Lines = Vec<Vec<u8>>;
+
+fn get_lines(bytes: &[u8]) -> Lines {
     let mut offset = 0 as usize;
     let mut indices = find_all_lf(bytes);
     indices.push(bytes.len() - 1);
@@ -129,11 +131,7 @@ fn match_header(line: &[u8], header: &[u8]) -> bool {
         panic!("header is empty")
     }
 
-    if line.len() < header.len() {
-        false
-    } else {
-        &line[..header.len()] == header
-    }
+    if line.len() < header.len() { false } else { line[..header.len()] == *header }
 }
 
 fn is_date_line(line: &[u8]) -> bool {
@@ -144,7 +142,7 @@ fn is_message_id_line(line: &[u8]) -> bool {
     match_header(line, MESSAGE_ID_BYTES)
 }
 
-fn replace_line<F1, F2>(lines: &Vec<Vec<u8>>, match_line: F1, make_line: F2) -> Vec<Vec<u8>>
+fn replace_line<F1, F2>(lines: &Lines, match_line: F1, make_line: F2) -> Lines
 where
     F1: Fn(&[u8]) -> bool,
     F2: Fn() -> String
@@ -161,27 +159,26 @@ where
     }
 }
 
-fn replace_date_line(lines: &Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+fn replace_date_line(lines: &Lines) -> Lines {
     replace_line(lines, is_date_line, make_now_date_line)
 }
 
-fn replace_message_id_line(lines: &Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+fn replace_message_id_line(lines: &Lines) -> Lines {
     replace_line(lines, is_message_id_line, make_random_message_id_line)
 }
 
-fn concat_bytes(bytes_list: &Vec<Vec<u8>>) -> Vec<u8> {
-    bytes_list.iter().flatten().cloned().collect()
+fn concat_bytes<L: AsRef<Lines>>(bytes_list: L) -> Vec<u8> {
+    bytes_list.as_ref().iter().flatten().cloned().collect()
 }
 
 fn replace_header(header: &[u8], update_date: bool, update_message_id: bool) -> Vec<u8> {
     let lines = get_lines(header);
-    let new_lines = match (update_date, update_message_id) {
+    concat_bytes(match (update_date, update_message_id) {
         (true, true) => replace_message_id_line(&replace_date_line(&lines)),
         (true, false) => replace_date_line(&lines),
         (false, true) => replace_message_id_line(&lines),
         (false, false) => lines
-    };
-    concat_bytes(&new_lines)
+    })
 }
 
 fn replace_mail(bytes: &[u8], update_date: bool, update_message_id: bool) -> Option<Vec<u8>> {
